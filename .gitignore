@@ -1,0 +1,26 @@
+# Build output
+/bin/
+
+# Runtime config (may contain DB passwords). Keep config.example.yaml tracked.
+/config.yaml
+/config.redis-only.yaml
+/.mcp.json
+/.claude/settings.local.json
+
+# SQL audit logs (contain real SQL & bind args; treat as sensitive)
+/logs/
+
+# Historical root-level build artifacts (pre-0.2.0). Keep these ignored so
+# accidental rebuild to the old path won't be committed.
+/mcp-add
+/mcp-add.exe
+/mcp-server
+/mcp-server.exe
+
+# Go toolchain / editor scratch
+/.gocache/
+*.test
+*.out
+.DS_Store
+
+/docs/
