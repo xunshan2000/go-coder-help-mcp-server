@@ -9,6 +9,14 @@
 - `db_describe_table` — 返回表的列与索引信息
 - `db_query` — 执行只读 SQL（支持参数化、max_rows 限制、r 模式双重保护）
 - `db_execute` — 执行写 SQL（仅 rw 源可用）
+- `redis_scan_keys` — 使用 SCAN 搜索 Redis key
+- `redis_get` — 查看 Redis key 的类型、TTL、大小和值
+- `redis_set` — 写入 Redis string key（支持可选 TTL）
+- `redis_delete` — 删除一个 Redis key
+- `redis_hset` / `redis_hdel` — 写入或删除 Redis hash 字段
+- `redis_lpush` / `redis_rpush` — 向 Redis list 左侧或右侧写入值
+- `redis_sadd` / `redis_srem` — 写入或删除 Redis set 成员
+- `redis_zadd` / `redis_zrem` — 写入或删除 Redis zset 成员
 
 ## 前置条件
 
@@ -33,22 +41,27 @@ go-mcp-server/
 │       ├── registry.go                    # 工具注册中心
 │       ├── add/
 │       │   └── add.go                     # add 工具
-│       └── db/
-│           ├── driver/                    # 驱动接口层（方言无关）
-│           │   ├── driver.go              #   Driver / ReadOnlyExec 接口
-│           │   ├── types.go               #   TableSchema / ColumnInfo / IndexInfo
-│           │   └── registry.go            #   Register / Get / Names
-│           ├── drivers/                   # 驱动实现（一驱动一子包）
-│           │   └── mysql/
-│           │       └── mysql.go           #   MySQL 驱动实现 + init() 自注册
-│           ├── pool.go                    # 连接池
-│           ├── guard.go                   # SQL 守卫（首 token 白名单 + 多语句拒绝）
-│           ├── list_tables.go             # db_list_tables
-│           ├── describe_table.go          # db_describe_table
-│           ├── query.go                   # db_query
-│           ├── execute.go                 # db_execute
-│           ├── render.go                  # JSON 结果 / 错误 helper
-│           └── register.go                # blank import drivers/** + Register
+│       ├── db/
+│       │   ├── driver/                    # 驱动接口层（方言无关）
+│       │   │   ├── driver.go              #   Driver / ReadOnlyExec 接口
+│       │   │   ├── types.go               #   TableSchema / ColumnInfo / IndexInfo
+│       │   │   └── registry.go            #   Register / Get / Names
+│       │   ├── drivers/                   # 驱动实现（一驱动一子包）
+│       │   │   └── mysql/
+│       │   │       └── mysql.go           #   MySQL 驱动实现 + init() 自注册
+│       │   ├── pool.go                    # 连接池
+│       │   ├── guard.go                   # SQL 守卫（首 token 白名单 + 多语句拒绝）
+│       │   ├── list_tables.go             # db_list_tables
+│       │   ├── describe_table.go          # db_describe_table
+│       │   ├── query.go                   # db_query
+│       │   ├── execute.go                 # db_execute
+│       │   ├── render.go                  # JSON 结果 / 错误 helper
+│       │   └── register.go                # blank import drivers/** + Register
+│       └── redis/
+│           ├── scan.go                    # redis_scan_keys
+│           ├── get.go                     # redis_get
+│           ├── write.go                   # redis_set / redis_delete
+│           └── register.go
 ```
 
 ## 构建
@@ -94,6 +107,13 @@ cp config.example.yaml config.yaml
 | `databases.<key>.password` | 否 | `""` | |
 | `databases.<key>.mode` | 是 | — | `r`（只读）或 `rw`（读写） |
 | `databases.<key>.params` | 否 | `{}` | `map[string]string`，透传驱动特定 DSN 参数；禁止 `multiStatements: "true"` |
+| `redis.<key>` | 否 | — | Redis 数据源；map key 即工具调用时的 `source` |
+| `redis.<key>.host` | 是 | — | Redis 主机 |
+| `redis.<key>.port` | 否 | `6379` | Redis 端口 |
+| `redis.<key>.auth` | 否 | `""` | Redis AUTH 密码 |
+| `redis.<key>.index` | 否 | `0` | Redis DB index |
+| `redis.<key>.dial_timeout` | 否 | `5s` | 建连超时 |
+| `redis.<key>.read_timeout` | 否 | `5s` | 单次命令读写 deadline |
 
 ### 驱动特有字段（MySQL）
 
@@ -214,11 +234,64 @@ LLM 调用时用 `source: "master"` / `source: "replica"` 切换。
 { "source": "master", "rows_affected": 1, "last_insert_id": 42 }
 ```
 
+### `redis_set`
+
+参数：
+```json
+{ "source": "redis", "key": "user:1:name", "value": "Alice", "ttl_seconds": 3600 }
+```
+
+返回：
+```json
+{ "source": "redis", "key": "user:1:name", "ok": true, "ttl_seconds": 3600 }
+```
+
+### `redis_delete`
+
+参数：
+```json
+{ "source": "redis", "key": "user:1:name" }
+```
+
+返回：
+```json
+{ "source": "redis", "key": "user:1:name", "deleted": 1 }
+```
+
+### Redis 结构写入
+
+Hash：
+```json
+{ "source": "redis", "key": "user:1", "fields": { "name": "Alice", "role": "admin" } }
+```
+工具：`redis_hset`，返回 `fields_changed`。删除字段用 `redis_hdel`：
+```json
+{ "source": "redis", "key": "user:1", "fields": ["role"] }
+```
+
+List：
+```json
+{ "source": "redis", "key": "queue:jobs", "values": ["job-1", "job-2"] }
+```
+工具：`redis_lpush` 或 `redis_rpush`，返回写入后的 `length`。
+
+Set：
+```json
+{ "source": "redis", "key": "user:1:tags", "members": ["vip", "beta"] }
+```
+工具：`redis_sadd`，返回 `members_added`。删除成员用 `redis_srem`。
+
+ZSet：
+```json
+{ "source": "redis", "key": "rank:daily", "members": { "alice": 99.5, "bob": 88 } }
+```
+工具：`redis_zadd`，返回 `members_changed`。删除成员用 `redis_zrem`。
+
 ## SQL 审计日志
 
 每次 `db_query` / `db_execute` 调用结束后（无论成功或失败），会被追加一条 JSON 记录到本地审计日志。用于事后排查、安全审计、慢查询分析。
 
-- **位置**：进程启动 cwd 下 `./logs/sql-YYYY-MM-DD.log`（相对路径；`./logs/` 首次写入时自动创建）
+- **位置**：配置文件所在目录下 `logs/sql-YYYY-MM-DD.log`（例如 `--config E:\code\go-mcp-server\config.yaml` 时写入 `E:\code\go-mcp-server\logs\`）
 - **格式**：[JSONL](https://jsonlines.org/)（一行一条 JSON，`\n` 分隔）
 - **滚动**：按**本地时区**日期滚动；跨日后下一次写入自动切到新文件
 - **并发安全**：多 MCP 请求并发调用时每行原子完整
@@ -368,7 +441,7 @@ Apipost Token 是唯一授权凭据 —— LLM 误调 `apipost_delete_apis` 会�
 参见上文"SQL 审计日志"一节。关键点：
 
 - 日志**默认启用**，不可关闭（v1 无配置开关；需要时通过后续 change 放开）
-- 文件路径 `./logs/sql-*.log` 已被 `.gitignore` 默认忽略，防止业务 SQL / 参数值被意外 commit
+- 文件路径 `<配置文件所在目录>/logs/sql-*.log` 已被 `.gitignore` 默认忽略，防止业务 SQL / 参数值被意外 commit
 - 视同敏感数据：建议**定期 rotate**、**离线归档**、**加密静态存储**；文件系统权限 `0640`（属主可读写、同组只读）
 - 日志写失败**不会**让 MCP 请求失败：磁盘满 / 目录只读等降级到 stderr 一行告警，不包含 SQL 或 args 内容
 

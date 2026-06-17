@@ -37,6 +37,8 @@ databases:
       min_connections: 1
 
 redis:
+  # Redis sources support read tools plus writes for string/hash/list/set/zset.
+  # Write permission is controlled by the Redis account/ACL configured here.
   redis:
     host: 127.0.0.1
     port: 6379

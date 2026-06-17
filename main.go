@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 
 	"example.com/mcp-server/internal/config"
 	"example.com/mcp-server/internal/server"
@@ -39,7 +40,7 @@ func main() {
 		}
 		defer pool.Close()
 
-		logger, err := sqllog.New("./logs")
+		logger, err := sqllog.New(sqlLogDir(*configPath))
 		if err != nil {
 			log.Fatalf("init sql audit logger: %v", err)
 		}
@@ -77,4 +78,12 @@ func main() {
 	if err := server.Serve(srv); err != nil {
 		log.Fatalf("server error: %v", err)
 	}
+}
+
+func sqlLogDir(configPath string) string {
+	absConfig, err := filepath.Abs(configPath)
+	if err != nil {
+		return filepath.Join(".", "logs")
+	}
+	return filepath.Join(filepath.Dir(absConfig), "logs")
 }
