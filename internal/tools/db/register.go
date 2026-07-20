@@ -13,5 +13,7 @@ func Register(r *tools.Registry, pool *Pool, defaults config.Defaults, logger *s
 	r.Add(newListTablesTool(), handleListTables(pool))
 	r.Add(newDescribeTableTool(), handleDescribeTable(pool))
 	r.Add(newQueryTool(), handleQuery(pool, defaults, logger))
-	r.Add(newExecuteTool(), handleExecute(pool, logger))
+	if pool.HasWritableSources() {
+		r.Add(newExecuteTool(), handleExecute(pool, logger))
+	}
 }

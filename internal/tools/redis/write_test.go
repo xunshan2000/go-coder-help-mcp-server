@@ -7,10 +7,15 @@ import (
 	"fmt"
 	"net"
 	"reflect"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
+	mcpserver "github.com/mark3labs/mcp-go/server"
+
+	"example.com/mcp-server/internal/tools"
 )
 
 func TestHandleSet_WithTTL(t *testing.T) {
@@ -21,6 +26,7 @@ func TestHandleSet_WithTTL(t *testing.T) {
 	res, err := handleSet(pool)(context.Background(), mcp.CallToolRequest{
 		Params: mcp.CallToolParams{
 			Arguments: map[string]any{
+				"environment": "test1",
 				"source":      "cache",
 				"key":         "demo",
 				"value":       "hello",
@@ -55,8 +61,9 @@ func TestHandleDelete(t *testing.T) {
 	res, err := handleDelete(pool)(context.Background(), mcp.CallToolRequest{
 		Params: mcp.CallToolParams{
 			Arguments: map[string]any{
-				"source": "cache",
-				"key":    "demo",
+				"environment": "test1",
+				"source":      "cache",
+				"key":         "demo",
 			},
 		},
 	})
@@ -170,21 +177,91 @@ func TestReadOptionalPositiveIntRejectsFractionalTTL(t *testing.T) {
 	}
 }
 
-func redisTestPool(addr string) *Pool {
-	return &Pool{
-		sources: map[string]*Source{
-			"cache": {
-				Key:         "cache",
-				Addr:        addr,
-				DialTimeout: time.Second,
-				ReadTimeout: time.Second,
-			},
+func TestWriteHandlerRejectsReadOnlySource(t *testing.T) {
+	src := &Source{Environment: "test1", Key: "cache"}
+	pool := &Pool{
+		sources: map[string]map[string]*Source{"test1": {"cache": src}},
+		ordered: []*Source{src},
+	}
+	res, err := handleSet(pool)(context.Background(), testCall(map[string]any{
+		"source": "cache",
+		"key":    "demo",
+		"value":  "blocked",
+	}))
+	if err != nil {
+		t.Fatalf("handleSet returned protocol error: %v", err)
+	}
+	if !res.IsError || !strings.Contains(resultText(t, res), "environments.test1.redis.cache.write: true") {
+		t.Fatalf("expected read-only error, got: %s", resultText(t, res))
+	}
+}
+
+func TestRegisterWriteToolsOnlyWhenWritableSourceExists(t *testing.T) {
+	readSource := &Source{Environment: "test1", Key: "cache"}
+	readOnly := &Pool{sources: map[string]map[string]*Source{"test1": {"cache": readSource}}, ordered: []*Source{readSource}}
+	readServer := mcpserver.NewMCPServer("test", "test")
+	Register(tools.NewRegistry(readServer), readOnly)
+	if _, ok := readServer.ListTools()["redis_set"]; ok {
+		t.Fatal("redis_set must not be registered for read-only sources")
+	}
+	if _, ok := readServer.ListTools()["redis_get"]; !ok {
+		t.Fatal("redis_get must be registered for read-only sources")
+	}
+
+	writeSource := &Source{Environment: "test1", Key: "cache", Write: true}
+	writable := &Pool{sources: map[string]map[string]*Source{"test1": {"cache": writeSource}}, ordered: []*Source{writeSource}}
+	writeServer := mcpserver.NewMCPServer("test", "test")
+	Register(tools.NewRegistry(writeServer), writable)
+	if _, ok := writeServer.ListTools()["redis_set"]; !ok {
+		t.Fatal("redis_set must be registered when a writable source exists")
+	}
+	for name, serverTool := range writeServer.ListTools() {
+		if name == "redis_help" {
+			continue
+		}
+		if _, ok := serverTool.Tool.InputSchema.Properties["environment"]; !ok || !slices.Contains(serverTool.Tool.InputSchema.Required, "environment") {
+			t.Fatalf("tool %s must require environment", name)
+		}
+	}
+}
+
+func TestPoolSeparatesSameSourceNameByEnvironment(t *testing.T) {
+	pro := &Source{Environment: "pro", Key: "cache"}
+	local := &Source{Environment: "local", Key: "cache"}
+	pool := &Pool{
+		sources: map[string]map[string]*Source{
+			"pro":   {"cache": pro},
+			"local": {"cache": local},
 		},
-		keys: []string{"cache"},
+		ordered: []*Source{local, pro},
+	}
+	if got, err := pool.Get("pro", "cache"); err != nil || got != pro {
+		t.Fatalf("Get(pro, cache) = %v, %v", got, err)
+	}
+	if got, err := pool.Get("local", "cache"); err != nil || got != local {
+		t.Fatalf("Get(local, cache) = %v, %v", got, err)
+	}
+}
+
+func redisTestPool(addr string) *Pool {
+	src := &Source{
+		Environment: "test1",
+		Key:         "cache",
+		Addr:        addr,
+		Write:       true,
+		DialTimeout: time.Second,
+		ReadTimeout: time.Second,
+	}
+	return &Pool{
+		sources: map[string]map[string]*Source{"test1": {"cache": src}},
+		ordered: []*Source{src},
 	}
 }
 
 func testCall(args map[string]any) mcp.CallToolRequest {
+	if _, ok := args["environment"]; !ok {
+		args["environment"] = "test1"
+	}
 	return mcp.CallToolRequest{Params: mcp.CallToolParams{Arguments: args}}
 }
 

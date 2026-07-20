@@ -11,7 +11,6 @@ import (
 	"example.com/mcp-server/internal/config"
 	"example.com/mcp-server/internal/server"
 	"example.com/mcp-server/internal/tools"
-	"example.com/mcp-server/internal/tools/add"
 	"example.com/mcp-server/internal/tools/apipost"
 	apipostclient "example.com/mcp-server/internal/tools/apipost/client"
 	"example.com/mcp-server/internal/tools/db"
@@ -28,30 +27,35 @@ func main() {
 		log.Fatalf("load config: %v", err)
 	}
 
-	srv := server.New("mcp-server", "0.3.0")
+	srv := server.New("mcp-server", "0.5.0")
 	reg := tools.NewRegistry(srv)
 
-	add.Register(reg)
-
-	if len(cfg.Databases) > 0 {
+	if cfg.Features.DatabaseEnabled() && cfg.HasDatabases() {
 		pool, err := db.NewPool(context.Background(), cfg)
 		if err != nil {
 			log.Fatalf("init db pool: %v", err)
 		}
 		defer pool.Close()
 
-		logger, err := sqllog.New(sqlLogDir(*configPath))
-		if err != nil {
-			log.Fatalf("init sql audit logger: %v", err)
+		var logger *sqllog.Logger
+		if cfg.Features.SQLAuditEnabled() {
+			logger, err = sqllog.New(sqlLogDir(*configPath))
+			if err != nil {
+				log.Fatalf("init sql audit logger: %v", err)
+			}
+			defer logger.Close()
+		} else {
+			fmt.Fprintln(os.Stderr, "[mcp-server] sql audit disabled")
 		}
-		defer logger.Close()
 
 		db.Register(reg, pool, cfg.Defaults, logger)
+	} else if !cfg.Features.DatabaseEnabled() {
+		fmt.Fprintln(os.Stderr, "[mcp-server] database disabled")
 	} else {
 		fmt.Fprintln(os.Stderr, "[mcp-server] databases not configured; skipping db tools")
 	}
 
-	if len(cfg.Redis) > 0 {
+	if cfg.Features.RedisEnabled() && cfg.HasRedis() {
 		pool, err := redistools.NewPool(context.Background(), cfg)
 		if err != nil {
 			log.Fatalf("init redis pool: %v", err)
@@ -59,11 +63,13 @@ func main() {
 		defer pool.Close()
 
 		redistools.Register(reg, pool)
+	} else if !cfg.Features.RedisEnabled() {
+		fmt.Fprintln(os.Stderr, "[mcp-server] redis disabled")
 	} else {
 		fmt.Fprintln(os.Stderr, "[mcp-server] redis not configured; skipping redis tools")
 	}
 
-	if cfg.Apipost != nil {
+	if cfg.Features.ApipostEnabled() && cfg.Apipost != nil {
 		client, err := apipostclient.New(*cfg.Apipost)
 		if err != nil {
 			log.Fatalf("init apipost client: %v", err)
@@ -71,6 +77,8 @@ func main() {
 		apipost.Register(reg, client)
 		fmt.Fprintf(os.Stderr, "[mcp-server] apipost enabled: base_url=%s project_name=%s timeout=%s\n",
 			client.ForDisplayBaseURL(), cfg.Apipost.ProjectName, cfg.Apipost.RequestTimeout)
+	} else if !cfg.Features.ApipostEnabled() {
+		fmt.Fprintln(os.Stderr, "[mcp-server] apipost disabled")
 	} else {
 		fmt.Fprintln(os.Stderr, "[mcp-server] apipost not configured; skipping apipost tools")
 	}

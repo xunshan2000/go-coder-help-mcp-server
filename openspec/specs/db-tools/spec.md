@@ -5,6 +5,14 @@
 
 ## Requirements
 
+### Requirement: 环境与数据源联合路由
+所有数据库工具 SHALL 接收必填字符串参数 `environment` 与 `source`，并以二者联合定位连接。环境名 MUST 来自配置的 `environments` map，MUST 支持 `pro`、`local`、`test1`、`test2` 等任意配置值；同名 source 在不同环境中 MUST 保持完全隔离。`db_help` MUST 返回每个可用的 `environment` / `source` 组合及其 `write_allowed`。
+
+#### Scenario: 访问同名的不同环境数据库
+- **WHEN** `pro` 与 `local` 环境均存在 `platform` source
+- **AND** 客户端分别调用 `{"environment":"pro","source":"platform"}` 与 `{"environment":"local","source":"platform"}`
+- **THEN** 两次调用 MUST 使用各自环境下的独立连接
+
 ### Requirement: Driver 接口约束
 系统 SHALL 定义一个 `Driver` 接口，所有数据库驱动（MySQL、PostgreSQL、ClickHouse 等）MUST 通过实现该接口接入。工具层（`db_list_tables` / `db_describe_table` / `db_query` / `db_execute` 的 handler）MUST NOT 直接拼接任何特定方言的 SQL（如 `SHOW TABLES`、`SHOW FULL COLUMNS`）或硬编码任何方言特有的标识符转义字符；方言相关的所有行为 MUST 通过 Driver 接口委托给具体驱动实现。
 
@@ -37,12 +45,12 @@
 `Driver.BeginReadOnly` MUST 返回一个 `ReadOnlyExec`，该接口至少包含 `QueryContext`、`Commit`、`Rollback` 三个方法。支持只读事务的驱动（例如 MySQL、PostgreSQL）MUST 在该方法内开启数据库事务（以 `ReadOnly: true` 或等价机制），事务 MUST 阻止任何数据变更；不支持只读事务的驱动（例如 ClickHouse、SQLite）MAY 返回对 `*sql.DB` 的直接包装，此时 `Commit` / `Rollback` MUST 为空操作（返回 `nil`），且驱动实现 MUST 在其 README / 文档中声明"该驱动的只读保证完全依赖最小权限账号"。
 
 #### Scenario: MySQL 驱动的只读事务阻止写入
-- **WHEN** 在 mode 为 `r` 的 MySQL source 上调用 `db_query`，参数 `sql` 为 `"SELECT * FROM users WHERE id=1 FOR UPDATE"`
+- **WHEN** 在任意 MySQL source 上调用 `db_query`，参数 `sql` 为 `"SELECT * FROM users WHERE id=1 FOR UPDATE"`
 - **THEN** 响应 MUST 标记为错误（MySQL 只读事务会拒绝 `FOR UPDATE`）
 - **AND** 错误文本 MUST 指明底层数据库拒绝原因或"只读上下文下禁止加锁"
 
 ### Requirement: db_list_tables 工具
-系统 SHALL 注册名为 `db_list_tables` 的 MCP 工具，接收必填参数 `source`（字符串，对应配置中 `databases` map 的 key），返回该数据源下所有用户表的名称列表。该工具对任意 `mode`（`r` / `rw`）的数据源均可用。实现 MUST 通过 `Driver.ListTables` 完成，工具层 MUST NOT 直接构造方言 SQL。
+系统 SHALL 注册名为 `db_list_tables` 的 MCP 工具，接收必填参数 `source`（字符串，对应配置中 `databases` map 的 key），返回该数据源下所有用户表的名称列表。该工具对任意数据源均可用，不受 `write` 配置影响。实现 MUST 通过 `Driver.ListTables` 完成，工具层 MUST NOT 直接构造方言 SQL。
 
 #### Scenario: 列出表
 - **WHEN** 客户端调用 `tools/call` 工具 `db_list_tables`，参数 `{"source": "primary"}`，配置中 `primary` 指向一个含若干表的数据库
@@ -55,7 +63,7 @@
 - **AND** 文本内容 MUST 包含该 source 名称与"可用 source"的列表
 
 ### Requirement: db_describe_table 工具
-系统 SHALL 注册名为 `db_describe_table` 的 MCP 工具，接收必填参数 `source`（字符串）与 `table`（字符串），返回该表的列定义与索引信息。该工具对任意 `mode` 的数据源均可用。实现 MUST 通过 `Driver.DescribeTable` 完成，工具层 MUST NOT 直接构造方言 SQL，也 MUST NOT 拼接 `table` 到任何 SQL 字符串（拼接由各驱动实现在其 `QuoteIdentifier` 保护下进行）。`table` 参数 MUST 先由工具层通过字符集白名单（至少允许 `[A-Za-z0-9_$]+`）预筛，非法字符立即返回错误。
+系统 SHALL 注册名为 `db_describe_table` 的 MCP 工具，接收必填参数 `source`（字符串）与 `table`（字符串），返回该表的列定义与索引信息。该工具对任意数据源均可用，不受 `write` 配置影响。实现 MUST 通过 `Driver.DescribeTable` 完成，工具层 MUST NOT 直接构造方言 SQL，也 MUST NOT 拼接 `table` 到任何 SQL 字符串（拼接由各驱动实现在其 `QuoteIdentifier` 保护下进行）。`table` 参数 MUST 先由工具层通过字符集白名单（至少允许 `[A-Za-z0-9_$]+`）预筛，非法字符立即返回错误。
 
 #### Scenario: 描述表结构
 - **WHEN** 客户端调用 `db_describe_table`，参数 `{"source": "primary", "table": "users"}`，`users` 表存在
@@ -74,10 +82,10 @@
 - **AND** 数据库 MUST NOT 收到任何相关 SQL
 
 ### Requirement: db_query 工具
-系统 SHALL 注册名为 `db_query` 的 MCP 工具，接收必填参数 `source`（字符串）与 `sql`（字符串），可选参数 `args`（任意类型数组，用于参数化占位符）与 `max_rows`（正整数）。执行成功时 MUST 返回包含 `columns`、`rows`（二维数组）、`row_count` 与 `truncated` 字段的 JSON 文本。执行 SQL MUST 使用参数化占位符（`?`）传入 `args`，MUST NOT 使用字符串拼接。该工具对 `mode` 为 `r` 或 `rw` 的数据源均可用；`r` 源的执行路径 MUST 通过 `Driver.BeginReadOnly` 提供的 `ReadOnlyExec.QueryContext`，工具层负责在读取完成后调用 `Commit`，在出错时调用 `Rollback`；`rw` 源可直接通过 `*sql.DB.QueryContext` 执行。
+系统 SHALL 注册名为 `db_query` 的 MCP 工具，接收必填参数 `source`（字符串）与 `sql`（字符串），可选参数 `args`（任意类型数组，用于参数化占位符）与 `max_rows`（正整数）。执行成功时 MUST 返回包含 `columns`、`rows`（二维数组）、`row_count` 与 `truncated` 字段的 JSON 文本。执行 SQL MUST 使用参数化占位符（`?`）传入 `args`，MUST NOT 使用字符串拼接。该工具对所有数据源均可用，并且无论 `write` 为何值，都 MUST 通过 `Driver.BeginReadOnly` 提供的 `ReadOnlyExec.QueryContext` 执行；工具层负责在读取完成后调用 `Commit`，在出错时调用 `Rollback`。
 
 #### Scenario: 简单 SELECT
-- **WHEN** 在 mode 为 `r` 或 `rw` 的 source 上调用 `db_query`，参数 `{"source": "primary", "sql": "SELECT 1 AS n"}`
+- **WHEN** 在任意 source 上调用 `db_query`，参数 `{"source": "primary", "sql": "SELECT 1 AS n"}`
 - **THEN** 响应 MUST 为 `isError: false`
 - **AND** 文本 JSON 的 `columns` MUST 等于 `["n"]`
 - **AND** `rows` MUST 等于 `[[1]]`
@@ -104,7 +112,7 @@
 - **THEN** 实际生效的上限 MUST 是全局 `max_rows`（`100`），不允许调用端抬高
 
 #### Scenario: r 源上执行非只读语句
-- **WHEN** 在 mode 为 `r` 的 source 上调用 `db_query`，参数 `{"source": "reporting", "sql": "UPDATE users SET email='x' WHERE id=1"}`
+- **WHEN** 在任意 source 上调用 `db_query`，参数 `{"source": "reporting", "sql": "UPDATE users SET email='x' WHERE id=1"}`
 - **THEN** 响应 MUST 标记为错误
 - **AND** 错误文本 MUST 指明该 source 仅允许只读语句
 - **AND** 对底层数据库 MUST NOT 发出任何形式的 UPDATE 请求
@@ -119,26 +127,26 @@
 - **THEN** 响应 MUST 标记为错误（首 token 判定应先剥离前导 `--` / `/* */` 注释再取首 token，此处首 token 为 `UPDATE`）
 
 ### Requirement: db_execute 工具
-系统 SHALL 注册名为 `db_execute` 的 MCP 工具，接收必填参数 `source`（字符串）与 `sql`（字符串），可选参数 `args`（任意类型数组）。仅对 `mode` 为 `rw` 的数据源可用；`r` 模式的 source 上调用 MUST 被拒绝。成功时 MUST 返回包含 `rows_affected` 与 `last_insert_id` 字段的 JSON 文本。SQL MUST 通过参数化占位符传入 `args`，MUST NOT 使用字符串拼接。
+系统 SHALL 仅在至少一个数据库数据源配置 `write: true` 时注册名为 `db_execute` 的 MCP 工具。该工具接收必填参数 `source`（字符串）与 `sql`（字符串），可选参数 `args`（任意类型数组），并且 MUST 在每次调用时再次校验所选 source 的 `write` 值；`write: false` 或省略 `write` 的 source MUST 被拒绝。成功时 MUST 返回包含 `rows_affected` 与 `last_insert_id` 字段的 JSON 文本。SQL MUST 通过参数化占位符传入 `args`，MUST NOT 使用字符串拼接。
 
-#### Scenario: 在 rw 源上执行 INSERT
-- **WHEN** 在 mode 为 `rw` 的 source 上调用 `db_execute`，参数为合法的 `INSERT ...` 语句（含 `args`）
+#### Scenario: 在可写源上执行 INSERT
+- **WHEN** 在 `write: true` 的 source 上调用 `db_execute`，参数为合法的 `INSERT ...` 语句（含 `args`）
 - **THEN** 响应 MUST 为 `isError: false`
 - **AND** 文本 JSON MUST 包含 `rows_affected`（非负整数）与 `last_insert_id`（非负整数）
 
 #### Scenario: 在 r 源上调用 db_execute
-- **WHEN** 在 mode 为 `r` 的 source 上调用 `db_execute` 携带任意 SQL
+- **WHEN** 在 `write: false` 或省略 `write` 的 source 上调用 `db_execute` 携带任意 SQL
 - **THEN** 响应 MUST 标记为错误
 - **AND** 错误文本 MUST 指明该 source 为只读
 - **AND** MUST NOT 对底层数据库发出任何修改请求
 
 #### Scenario: db_execute 拒绝 SELECT 作为顶层语句
-- **WHEN** 在 mode 为 `rw` 的 source 上调用 `db_execute`，`sql` 的首 token 为 `SELECT`、`SHOW`、`DESCRIBE`、`DESC` 或 `EXPLAIN`
+- **WHEN** 在 `write: true` 的 source 上调用 `db_execute`，`sql` 的首 token 为 `SELECT`、`SHOW`、`DESCRIBE`、`DESC` 或 `EXPLAIN`
 - **THEN** 响应 MUST 标记为错误
 - **AND** 错误文本 MUST 提示使用 `db_query` 代替 `db_execute` 来执行只读语句
 
 ### Requirement: 只读双重保护
-对 `mode` 为 `r` 的数据源执行 `db_query` 时，系统 SHALL 同时做到两件事：(1) 工具层首 token 白名单校验（允许集合为 `SELECT` / `SHOW` / `DESCRIBE` / `DESC` / `EXPLAIN` / `WITH` / `VALUES`）；(2) 通过 `Driver.BeginReadOnly` 获取只读执行上下文，在该上下文中执行查询并在完成后 Commit 或 Rollback。即使白名单由于未知原因被绕过，驱动层的只读上下文（或最小权限账号兜底）也 MUST 阻止数据变更。
+对任意数据源执行 `db_query` 时，系统 SHALL 同时做到两件事：(1) 工具层首 token 白名单校验（允许集合为 `SELECT` / `SHOW` / `DESCRIBE` / `DESC` / `EXPLAIN` / `WITH` / `VALUES`）；(2) 通过 `Driver.BeginReadOnly` 获取只读执行上下文，在该上下文中执行查询并在完成后 Commit 或 Rollback。即使数据源配置了 `write: true`，`db_query` 也 MUST 保持只读；只有 `db_execute` 可以执行写操作。
 
 #### Scenario: 只读校验失败不会建立连接外的副作用
 - **WHEN** 首 token 白名单判定失败（例如传入 `UPDATE ...`）

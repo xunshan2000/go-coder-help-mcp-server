@@ -6,6 +6,9 @@ func Register(r *tools.Registry, pool *Pool) {
 	r.Add(newHelpTool(pool), handleHelp(pool))
 	r.Add(newScanKeysTool(pool), handleScanKeys(pool))
 	r.Add(newGetTool(pool), handleGet(pool))
+	if !pool.HasWritableSources() {
+		return
+	}
 	r.Add(newSetTool(pool), handleSet(pool))
 	r.Add(newDeleteTool(pool), handleDelete(pool))
 	r.Add(newHSetTool(pool), handleHSet(pool))

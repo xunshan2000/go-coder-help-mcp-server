@@ -11,6 +11,7 @@ import (
 func newGetTool(pool *Pool) mcp.Tool {
 	return mcp.NewTool("redis_get",
 		mcp.WithDescription(fmt.Sprintf("Inspect one Redis key in read-only mode. The tool auto-detects key type, returns exists/type/ttl_seconds/size, and reads common value types: string, hash, list, set, zset. Large collections are capped by max_items and may return truncated=true or next_cursor. %s", sourceSummary(pool))),
+		environmentOption(),
 		mcp.WithString("source",
 			mcp.Description("Redis source key. Required. Call redis_help first to see available sources."),
 			mcp.Required(),
@@ -29,6 +30,10 @@ func handleGet(pool *Pool) func(ctx context.Context, req mcp.CallToolRequest) (*
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		args := req.GetArguments()
 
+		environment, err := readRequiredString(args, "environment")
+		if err != nil {
+			return renderErrorf("%s", err), nil
+		}
 		sourceName, err := readRequiredString(args, "source")
 		if err != nil {
 			return renderErrorf("%s", err), nil
@@ -39,14 +44,14 @@ func handleGet(pool *Pool) func(ctx context.Context, req mcp.CallToolRequest) (*
 		}
 		maxItems := readPositiveInt(args, "max_items", 100)
 
-		src, err := pool.Get(sourceName)
+		src, err := pool.Get(environment, sourceName)
 		if err != nil {
 			return renderErrorf("%s", err), nil
 		}
 
 		payload, err := loadKey(ctx, src, key, maxItems)
 		if err != nil {
-			return renderErrorf("redis get failed [%s.%s]: %v", src.Key, key, err), nil
+			return renderErrorf("redis get failed [%s/%s.%s]: %v", src.Environment, src.Key, key, err), nil
 		}
 		return renderJSONResult(payload), nil
 	}
@@ -63,9 +68,10 @@ func loadKey(ctx context.Context, src *Source, key string, maxItems int) (map[st
 	}
 
 	payload := map[string]any{
-		"source": src.Key,
-		"key":    key,
-		"type":   keyType,
+		"environment": src.Environment,
+		"source":      src.Key,
+		"key":         key,
+		"type":        keyType,
 	}
 	if keyType == "none" {
 		payload["exists"] = false

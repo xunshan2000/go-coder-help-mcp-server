@@ -2,13 +2,12 @@
 
 一个用 Go 实现的可扩展 MCP（Model Context Protocol）服务端，通过 stdio 与 MCP 客户端（Claude Code、Claude Desktop 等）通信。项目采用工具注册中心模式 + 驱动接口抽象，每个 MCP 工具以独立子包形式接入，数据库相关工具通过 `Driver` 接口支持多种方言。
 
-当前版本：`0.2.0`。内置工具：
+当前版本：`0.5.0`。内置工具：
 
-- `add` — 两数相加
 - `db_list_tables` — 列出数据源下的用户表
 - `db_describe_table` — 返回表的列与索引信息
 - `db_query` — 执行只读 SQL（支持参数化、max_rows 限制、r 模式双重保护）
-- `db_execute` — 执行写 SQL（仅 rw 源可用）
+- `db_execute` — 执行写 SQL（仅 `write: true` 的源可用）
 - `redis_scan_keys` — 使用 SCAN 搜索 Redis key
 - `redis_get` — 查看 Redis key 的类型、TTL、大小和值
 - `redis_set` — 写入 Redis string key（支持可选 TTL）
@@ -22,7 +21,7 @@
 
 - Go 1.21 或更高版本
 - 可访问 Go 模块代理（国内网络环境下可使用 `https://goproxy.cn`）
-- 至少一个可达的数据库实例（第一版支持 MySQL）
+- 至少配置并启用数据库、Redis 或 Apipost 中的一项
 
 ## 目录结构
 
@@ -39,8 +38,6 @@ go-mcp-server/
 │   │   └── server.go                      # MCP server 的薄封装
 │   └── tools/
 │       ├── registry.go                    # 工具注册中心
-│       ├── add/
-│       │   └── add.go                     # add 工具
 │       ├── db/
 │       │   ├── driver/                    # 驱动接口层（方言无关）
 │       │   │   ├── driver.go              #   Driver / ReadOnlyExec 接口
@@ -50,6 +47,7 @@ go-mcp-server/
 │       │   │   └── mysql/
 │       │   │       └── mysql.go           #   MySQL 驱动实现 + init() 自注册
 │       │   ├── pool.go                    # 连接池
+│       │   ├── sshtunnel/                 # SSH 隧道与 TCP 转发
 │       │   ├── guard.go                   # SQL 守卫（首 token 白名单 + 多语句拒绝）
 │       │   ├── list_tables.go             # db_list_tables
 │       │   ├── describe_table.go          # db_describe_table
@@ -99,21 +97,36 @@ cp config.example.yaml config.yaml
 | --- | --- | --- | --- |
 | `defaults.max_rows` | 否 | `100` | `db_query` 的行数上限；调用端 `max_rows` 参数只能降低不能抬高 |
 | `defaults.query_timeout` | 否 | `30s` | 单次 SQL 超时（Go `time.Duration` 格式） |
-| `databases.<key>` | 是 | — | map key 即数据源标识符；LLM 调用时 `source: "<key>"` 引用 |
-| `databases.<key>.driver` | 是 | — | 驱动名；目前支持 `mysql`，将来可扩展 |
-| `databases.<key>.host` | 是 | — | 数据库主机 |
-| `databases.<key>.database` | 是 | — | 库名（注意与 map key 区分） |
-| `databases.<key>.username` | 是 | — | |
-| `databases.<key>.password` | 否 | `""` | |
-| `databases.<key>.mode` | 是 | — | `r`（只读）或 `rw`（读写） |
-| `databases.<key>.params` | 否 | `{}` | `map[string]string`，透传驱动特定 DSN 参数；禁止 `multiStatements: "true"` |
-| `redis.<key>` | 否 | — | Redis 数据源；map key 即工具调用时的 `source` |
-| `redis.<key>.host` | 是 | — | Redis 主机 |
-| `redis.<key>.port` | 否 | `6379` | Redis 端口 |
-| `redis.<key>.auth` | 否 | `""` | Redis AUTH 密码 |
-| `redis.<key>.index` | 否 | `0` | Redis DB index |
-| `redis.<key>.dial_timeout` | 否 | `5s` | 建连超时 |
-| `redis.<key>.read_timeout` | 否 | `5s` | 单次命令读写 deadline |
+| `features.database` | 否 | `true` | 是否初始化数据库连接并注册 `db_*` 工具 |
+| `features.redis` | 否 | `true` | 是否初始化 Redis 连接并注册 `redis_*` 工具 |
+| `features.apipost` | 否 | `true` | 是否初始化 Apipost 客户端并注册 `apipost_*` 工具 |
+| `features.sql_audit` | 否 | `true` | 是否写 SQL 审计日志；不影响 `db_*` 工具注册 |
+| `environments.<env>` | 是 | — | 环境名，自由字符串，例如 `pro`、`local`、`test1`、`test2` |
+| `environments.<env>.databases.<key>` | 否 | — | 数据库逻辑名；同名 key 可在不同环境重复 |
+| `environments.<env>.databases.<key>.driver` | 是 | — | 驱动名；目前支持 `mysql`，将来可扩展 |
+| `environments.<env>.databases.<key>.host` | 是 | — | 数据库主机 |
+| `environments.<env>.databases.<key>.database` | 是 | — | 实际库名 |
+| `environments.<env>.databases.<key>.username` | 是 | — | |
+| `environments.<env>.databases.<key>.password` | 否 | `""` | |
+| `environments.<env>.databases.<key>.write` | 否 | `false` | 是否允许该数据源执行写操作；默认只读 |
+| `environments.<env>.databases.<key>.params` | 否 | `{}` | `map[string]string`，透传驱动特定 DSN 参数；禁止 `multiStatements: "true"` |
+| `environments.<env>.redis.<key>` | 否 | — | Redis 逻辑名；同名 key 可在不同环境重复 |
+| `environments.<env>.redis.<key>.host` | 是 | — | Redis 主机 |
+| `environments.<env>.redis.<key>.port` | 否 | `6379` | Redis 端口 |
+| `environments.<env>.redis.<key>.auth` | 否 | `""` | Redis AUTH 密码 |
+| `environments.<env>.redis.<key>.index` | 否 | `0` | Redis DB index |
+| `environments.<env>.redis.<key>.write` | 否 | `false` | 是否允许该 Redis 数据源执行写操作；默认只读 |
+| `environments.<env>.redis.<key>.dial_timeout` | 否 | `5s` | 建连超时 |
+| `environments.<env>.redis.<key>.read_timeout` | 否 | `5s` | 单次命令读写 deadline |
+| `environments.<env>.redis.<key>.ssh` | 否 | — | SSH 隧道；字段与 MySQL 的 `ssh` 配置一致 |
+
+模块开关未配置时默认开启。显式设为 `false` 后，该模块的配置校验、网络初始化和工具注册都会跳过，便于保留暂时停用的连接配置。
+
+### 环境维度
+
+环境名完全由配置决定，不内置固定枚举。所有数据库和 Redis 工具都要求同时传入 `environment` 与 `source`；例如 `{"environment":"pro","source":"platform"}` 与 `{"environment":"local","source":"platform"}` 会定位到两个独立连接。`db_help` / `redis_help` 会向模型列出所有可用组合及各自的 `write_allowed`。
+
+从 `0.4.x` 升级时，需要把原顶层 `databases` / `redis` 移入某个 `environments.<env>`，并把数据库的 `mode: rw` 改为 `write: true`、`mode: r` 改为 `write: false`（也可直接省略）。旧字段会被严格 YAML 校验拒绝，避免误以为写权限仍然生效。
 
 ### 驱动特有字段（MySQL）
 
@@ -124,6 +137,34 @@ cp config.example.yaml config.yaml
 | `collation` | 否 | 服务端默认 | DSN `collation` |
 | `timezone` | 否 | `UTC` | DSN `loc` 参数（**必须**是 Go `time.Location` 名，例如 `UTC` / `Local` / `Asia/Shanghai` / `Etc/GMT+5`；`+08:00` 等 offset 字符串不支持） |
 | `params.parseTime` | 否 | `"true"` | 将 DATETIME 列 parse 为 `time.Time` |
+
+### MySQL / Redis SSH 隧道
+
+每个 MySQL 或 Redis 数据源可配置独立的 `ssh` 段。启用后，服务先连接 SSH 跳板机，在本机创建仅监听 `127.0.0.1` 的临时端口，再通过该端口访问原始 `host:port`。
+
+```yaml
+environments:
+  pro:
+    databases:
+      platform:
+        driver: mysql
+        host: mysql.internal
+        port: 3306
+        database: platform
+        username: app_ro
+        password: db_password
+        write: false
+        ssh:
+          host: bastion.example.com
+          port: 22
+          username: deploy
+          private_key: .ssh/id_ed25519
+          private_key_passphrase: key_passphrase
+          known_hosts: .ssh/known_hosts
+          connect_timeout: 10s
+```
+
+`password` 与 `private_key` 至少配置一个，也可以同时配置作为多个认证候选。`private_key` 和 `known_hosts` 的相对路径以配置文件所在目录为基准；未配置 `known_hosts` 时默认使用当前用户的 `~/.ssh/known_hosts`。生产环境应保持主机密钥校验，仅在明确接受中间人攻击风险时设置 `insecure_skip_host_key: true`。SSH 密码、私钥口令、数据库密码和完整 DSN 均不会写入启动日志。
 
 ### 连接池
 
@@ -143,25 +184,29 @@ defaults:
   max_rows: 100
   query_timeout: 30s
 
-databases:
-  master:
-    driver: mysql
-    host: master.db.example
-    database: app
-    username: app_rw
-    password: <填你的>
-    mode: rw
+environments:
+  pro:
+    databases:
+      platform:
+        driver: mysql
+        host: pro.db.example
+        database: platform
+        username: app_rw
+        password: <填你的>
+        write: true
 
-  replica:
-    driver: mysql
-    host: replica.db.example
-    database: app
-    username: app_ro
-    password: <填你的>
-    mode: r
+  local:
+    databases:
+      platform:
+        driver: mysql
+        host: 127.0.0.1
+        database: platform
+        username: app_ro
+        password: <填你的>
+        write: false
 ```
 
-LLM 调用时用 `source: "master"` / `source: "replica"` 切换。
+LLM 调用时用 `environment: "pro", source: "platform"` / `environment: "local", source: "platform"` 切换。
 
 ## 数据库工具
 
@@ -169,25 +214,26 @@ LLM 调用时用 `source: "master"` / `source: "replica"` 切换。
 
 参数：
 ```json
-{ "source": "default" }
+{ "environment": "pro", "source": "platform" }
 ```
 返回（text 中的 JSON）：
 ```json
-{ "source": "default", "tables": ["users", "orders", "..."] }
+{ "environment": "pro", "source": "platform", "tables": ["users", "orders", "..."] }
 ```
 
 ### `db_describe_table`
 
 参数：
 ```json
-{ "source": "default", "table": "users" }
+{ "environment": "pro", "source": "platform", "table": "users" }
 ```
 `table` 必须匹配 `^[A-Za-z0-9_$]+$`，否则被工具层白名单拦下（不触达数据库）。
 
 返回：
 ```json
 {
-  "source": "default",
+  "environment": "pro",
+  "source": "platform",
   "table": "users",
   "columns": [
     {"name": "id", "type": "bigint(20)", "nullable": false, "key": "PRI", "default": null},
@@ -204,7 +250,7 @@ LLM 调用时用 `source: "master"` / `source: "replica"` 切换。
 
 参数：
 ```json
-{ "source": "default", "sql": "SELECT * FROM users WHERE id = ?", "args": [1], "max_rows": 50 }
+{ "environment": "pro", "source": "platform", "sql": "SELECT * FROM users WHERE id = ?", "args": [1], "max_rows": 50 }
 ```
 - `args` 通过 `?` 占位符参数化绑定（MySQL），永不拼入 SQL 字符串
 - `max_rows` 可选；不能抬高全局上限 `defaults.max_rows`，只能调低
@@ -212,7 +258,8 @@ LLM 调用时用 `source: "master"` / `source: "replica"` 切换。
 返回：
 ```json
 {
-  "source": "default",
+  "environment": "pro",
+  "source": "platform",
   "columns": ["id", "email"],
   "rows": [[1, "a@x.com"], [2, "b@x.com"]],
   "row_count": 2,
@@ -224,66 +271,68 @@ LLM 调用时用 `source: "master"` / `source: "replica"` 切换。
 
 参数：
 ```json
-{ "source": "master", "sql": "INSERT INTO users (email) VALUES (?)", "args": ["a@x.com"] }
+{ "environment": "pro", "source": "platform", "sql": "INSERT INTO users (email) VALUES (?)", "args": ["a@x.com"] }
 ```
-- 仅 `mode=rw` 的 source 可用
+- 仅 `write: true` 的 source 可用；没有任何可写数据库源时，`db_execute` 不会注册
 - 首关键字不能是 `SELECT`/`SHOW`/`DESCRIBE`/`DESC`/`EXPLAIN`（用 `db_query` 代替）
 
 返回：
 ```json
-{ "source": "master", "rows_affected": 1, "last_insert_id": 42 }
+{ "environment": "pro", "source": "platform", "rows_affected": 1, "last_insert_id": 42 }
 ```
 
 ### `redis_set`
 
+Redis 写工具仅在至少一个 Redis 数据源配置 `write: true` 时注册，并且调用时仍会校验所选 `source` 的写权限。
+
 参数：
 ```json
-{ "source": "redis", "key": "user:1:name", "value": "Alice", "ttl_seconds": 3600 }
+{ "environment": "pro", "source": "cache", "key": "user:1:name", "value": "Alice", "ttl_seconds": 3600 }
 ```
 
 返回：
 ```json
-{ "source": "redis", "key": "user:1:name", "ok": true, "ttl_seconds": 3600 }
+{ "environment": "pro", "source": "cache", "key": "user:1:name", "ok": true, "ttl_seconds": 3600 }
 ```
 
 ### `redis_delete`
 
 参数：
 ```json
-{ "source": "redis", "key": "user:1:name" }
+{ "environment": "pro", "source": "cache", "key": "user:1:name" }
 ```
 
 返回：
 ```json
-{ "source": "redis", "key": "user:1:name", "deleted": 1 }
+{ "environment": "pro", "source": "cache", "key": "user:1:name", "deleted": 1 }
 ```
 
 ### Redis 结构写入
 
 Hash：
 ```json
-{ "source": "redis", "key": "user:1", "fields": { "name": "Alice", "role": "admin" } }
+{ "environment": "pro", "source": "cache", "key": "user:1", "fields": { "name": "Alice", "role": "admin" } }
 ```
 工具：`redis_hset`，返回 `fields_changed`。删除字段用 `redis_hdel`：
 ```json
-{ "source": "redis", "key": "user:1", "fields": ["role"] }
+{ "environment": "pro", "source": "cache", "key": "user:1", "fields": ["role"] }
 ```
 
 List：
 ```json
-{ "source": "redis", "key": "queue:jobs", "values": ["job-1", "job-2"] }
+{ "environment": "pro", "source": "cache", "key": "queue:jobs", "values": ["job-1", "job-2"] }
 ```
 工具：`redis_lpush` 或 `redis_rpush`，返回写入后的 `length`。
 
 Set：
 ```json
-{ "source": "redis", "key": "user:1:tags", "members": ["vip", "beta"] }
+{ "environment": "pro", "source": "cache", "key": "user:1:tags", "members": ["vip", "beta"] }
 ```
 工具：`redis_sadd`，返回 `members_added`。删除成员用 `redis_srem`。
 
 ZSet：
 ```json
-{ "source": "redis", "key": "rank:daily", "members": { "alice": 99.5, "bob": 88 } }
+{ "environment": "pro", "source": "cache", "key": "rank:daily", "members": { "alice": 99.5, "bob": 88 } }
 ```
 工具：`redis_zadd`，返回 `members_changed`。删除成员用 `redis_zrem`。
 
@@ -302,8 +351,9 @@ ZSet：
 | 字段 | 类型 | 出现时机 | 说明 |
 | --- | --- | --- | --- |
 | `ts` | string | 始终 | `YYYY-MM-DD HH:MM:SS`（本地时区、秒级、无时区后缀） |
+| `environment` | string | 始终 | 环境 key（环境未识别时仍会记原样输入） |
 | `source` | string | 始终 | 数据源 key（source 未识别时仍会记原样输入） |
-| `mode` | string | 始终 | `r` / `rw`；source 未命中时为 `""` |
+| `mode` | string | 始终 | 兼容字段，由 `write` 派生：`false` 为 `r`、`true` 为 `rw`；source 未命中时为 `""` |
 | `tool` | string | 始终 | `db_query` / `db_execute` |
 | `sql` | string | 始终 | 用户原始 SQL（含 `?` 占位符，**未内联**） |
 | `sql_rendered` | string | 始终 | 驱动方言下 args 内联后的可读形式；**仅供人工阅读，不可执行** |
@@ -319,8 +369,8 @@ ZSet：
 ### 示例行
 
 ```json
-{"ts":"2026-05-06 10:44:24","source":"default","mode":"r","tool":"db_query","sql":"SELECT 1 AS one, ? AS two","sql_rendered":"SELECT 1 AS one, 42 AS two","args":[42],"duration_ms":266,"rows":1,"truncated":false,"ok":true}
-{"ts":"2026-05-06 10:44:24","source":"default","mode":"r","tool":"db_query","sql":"UPDATE t SET x = ? WHERE id = ?","sql_rendered":"UPDATE t SET x = 'v' WHERE id = 1","args":["v",1],"duration_ms":0,"ok":false,"err":"source=default mode=r: 该 source 仅允许只读语句..."}
+{"ts":"2026-05-06 10:44:24","environment":"pro","source":"platform","mode":"r","tool":"db_query","sql":"SELECT 1 AS one, ? AS two","sql_rendered":"SELECT 1 AS one, 42 AS two","args":[42],"duration_ms":266,"rows":1,"truncated":false,"ok":true}
+{"ts":"2026-05-06 10:44:24","environment":"pro","source":"platform","mode":"r","tool":"db_query","sql":"UPDATE t SET x = ? WHERE id = ?","sql_rendered":"UPDATE t SET x = 'v' WHERE id = 1","args":["v",1],"duration_ms":0,"ok":false,"err":"source=pro/platform: 只允许只读语句..."}
 ```
 
 ### jq 分析示例
@@ -421,26 +471,27 @@ Apipost Token 是唯一授权凭据 —— LLM 误调 `apipost_delete_apis` 会�
 本项目默认假设 LLM 产生的 SQL 不可完全信任，设计了多道防线：
 
 1. **账号权限（用户自保障）**：生产环境建议每个 source 配**最小权限账号**；只读 source 用数据库层面的 read-only user，不依赖工具层独家防护
-2. **`r` 模式双重保护**：
+2. **读工具双重保护**：`db_query` 对所有数据源都执行以下保护，无论 `write` 是否开启：
    - **工具层首 token 白名单**：SQL 剥注释后取首关键字，必须 ∈ `{SELECT, SHOW, DESCRIBE, DESC, EXPLAIN, WITH, VALUES}`
    - **驱动层只读上下文**：MySQL 驱动的 `BeginReadOnly` 返回 `BeginTx(ReadOnly=true)`；即使白名单被绕过，`FOR UPDATE` / DML / DDL 等会被数据库直接拒绝
 3. **多语句禁止**：DSN 不启用 `multiStatements`，且工具层字符串检查也拒绝；`params` 中禁止 `multiStatements: "true"`
 4. **参数化**：`args` 一律作为占位符绑定，驱动负责 escape，永不字符串拼接
 5. **超时**：所有 SQL 调用受 `defaults.query_timeout` 约束，超时会取消底层查询
 6. **行数上限**：`db_query` 返回的 `rows` 最多 `defaults.max_rows`，LLM 无法绕过
-7. **脱敏**：`password` 与组装后 DSN 不出现在任何日志或错误输出中
+7. **脱敏**：数据库密码、SSH 密码、私钥口令与组装后 DSN 不出现在任何日志或错误输出中
+8. **SSH 主机校验**：SSH 隧道默认通过 `known_hosts` 校验跳板机；跳过校验必须显式配置
 
 ### 建议的数据库账号配置
 
-- `r` 源：只授 `SELECT`，不给 `INSERT/UPDATE/DELETE/DROP/CREATE` 等
-- `rw` 源：按业务所需授予最小权限；避免给 `SUPER`、`FILE`（`INTO OUTFILE` 是 SELECT 但会写文件）等敏感权限
+- `write: false` 源：只授 `SELECT`，不给 `INSERT/UPDATE/DELETE/DROP/CREATE` 等
+- `write: true` 源：按业务所需授予最小权限；避免给 `SUPER`、`FILE`（`INTO OUTFILE` 是 SELECT 但会写文件）等敏感权限
 - 密码用强口令；`params.tls` 配置 TLS 连接（生产建议）
 
 ### 审计日志
 
 参见上文"SQL 审计日志"一节。关键点：
 
-- 日志**默认启用**，不可关闭（v1 无配置开关；需要时通过后续 change 放开）
+- 日志默认启用；设置 `features.sql_audit: false` 可关闭，数据库工具仍正常工作
 - 文件路径 `<配置文件所在目录>/logs/sql-*.log` 已被 `.gitignore` 默认忽略，防止业务 SQL / 参数值被意外 commit
 - 视同敏感数据：建议**定期 rotate**、**离线归档**、**加密静态存储**；文件系统权限 `0640`（属主可读写、同组只读）
 - 日志写失败**不会**让 MCP 请求失败：磁盘满 / 目录只读等降级到 stderr 一行告警，不包含 SQL 或 args 内容
@@ -533,11 +584,11 @@ import (
 printf '%s\n' \
   '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}' \
   '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
-  '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"add","arguments":{"a":2,"b":3}}}' \
+  '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
   | ./bin/mcp-server.exe --config ./config.yaml
 ```
 
-期望看到 `"text":"5"` 的工具调用结果 + `serverInfo.name == "mcp-server"` / `"version":"0.2.0"` 的 `initialize` 响应。
+期望看到已启用模块的工具列表，以及 `serverInfo.name == "mcp-server"` / `"version":"0.5.0"` 的 `initialize` 响应。
 
 ## 在 MCP 客户端中注册
 
@@ -571,43 +622,12 @@ printf '%s\n' \
 
 ⚠ **一定要显式传 `--config` 的绝对路径**：MCP 客户端拉起进程时 cwd 可能不是项目根目录，`./config.yaml` 的默认路径不一定能解析到。
 
-## 从 0.1.x 升级到 0.2.0
-
-0.2.0 是结构性重构 + 加入数据库工具的版本，有以下 BREAKING 变更：
-
-| 项 | 0.1.x | 0.2.0 |
-| --- | --- | --- |
-| Go module 名 | `example.com/mcp-add` | `example.com/mcp-server` |
-| MCP 服务名（initialize 响应） | `mcp-add` | `mcp-server` |
-| 版本号 | `0.1.0` | `0.2.0` |
-| 可执行文件名 | `mcp-add` / `mcp-add.exe`（根目录） | `mcp-server` / `mcp-server.exe`（`bin/`） |
-| 启动依赖 | 无 | 必须 `--config <path>` 指向 YAML 配置文件 |
-| `.mcp.json` `command` | 指向根目录旧二进制 | 指向 `bin/mcp-server(.exe)` |
-| `.mcp.json` `args` | `[]` | **必须**加 `["--config", "<绝对路径>/config.yaml"]` |
-| 新增工具 | — | `db_list_tables` / `db_describe_table` / `db_query` / `db_execute` |
-
-工具层面 `add` 的行为（名称、参数、返回格式、错误处理）完全不变。
-
 ## 如何新增一个普通工具（非数据库）
 
-以"新增 `sub`（两数相减）工具"为例：
+以新增 `health` 工具为例：
 
-1. **新建子包**：`internal/tools/sub/sub.go`，包名 `sub`
-2. **实现 `Register`**：在 `sub.go` 中定义 `func Register(r *tools.Registry)`，内部用 `mcp.NewTool("sub", ...)` 构造工具并通过 `r.Add(tool, handler)` 注册
-3. **在 `main.go` 调用**：加一行 `sub.Register(reg)`，并 import `"example.com/mcp-server/internal/tools/sub"`
+1. **新建子包**：`internal/tools/health/health.go`，包名 `health`
+2. **实现 `Register`**：在 `health.go` 中定义 `func Register(r *tools.Registry)`，内部用 `mcp.NewTool("health", ...)` 构造工具并通过 `r.Add(tool, handler)` 注册
+3. **在 `main.go` 调用**：加一行 `health.Register(reg)`，并 import `"example.com/mcp-server/internal/tools/health"`
 
-`add` 包可直接作为模板。数据库工具因涉及方言差异走驱动接口层，流程不同（见"添加新驱动"一节）。
-
-## 工具规格（补充）
-
-### `add`
-
-| 字段 | 说明 |
-| --- | --- |
-| `name` | `add` |
-| `description` | 返回两个数值的和 |
-| 参数 `a` | 必填，`number` 类型 |
-| 参数 `b` | 必填，`number` 类型 |
-| 返回值 | 文本内容，`a + b` 的最短十进制表示（如 `5`、`3.75`、`-6`） |
-
-**数值精度**：使用 IEEE-754 双精度浮点（`float64`），适用于 ±2^53（约 ±9.007×10^15）以内。超出范围可能丢失精度。
+数据库工具因涉及方言差异走驱动接口层，流程不同（见"添加新驱动"一节）。

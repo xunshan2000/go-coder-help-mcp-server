@@ -23,6 +23,7 @@ func TestLogger_BasicWriteAndCloseIdempotent(t *testing.T) {
 	trunc := false
 	l.Write(context.Background(), Entry{
 		TS:          "2026-05-06 10:00:00",
+		Environment: "pro",
 		Source:      "default",
 		Mode:        "r",
 		Tool:        "db_query",
@@ -58,7 +59,7 @@ func TestLogger_BasicWriteAndCloseIdempotent(t *testing.T) {
 	if err := json.Unmarshal([]byte(lines[0]), &e); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if e.Tool != "db_query" || e.OK != true || e.Rows == nil || *e.Rows != 3 {
+	if e.Environment != "pro" || e.Tool != "db_query" || e.OK != true || e.Rows == nil || *e.Rows != 3 {
 		t.Fatalf("parsed entry unexpected: %+v", e)
 	}
 

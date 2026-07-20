@@ -1,36 +1,36 @@
 # server-core Specification
 
 ## Purpose
-定义 MCP 服务端进程的统一身份、入口职责、工具注册机制以及构建产物输出位置。所有具体工具（add、数据库、未来加入的工具）都挂接到本规范描述的 server-core 之下。
+定义 MCP 服务端进程的统一身份、入口职责、工具注册机制以及构建产物输出位置。数据库、Redis、Apipost 及未来加入的工具都挂接到本规范描述的 server-core 之下。
 
 ## Requirements
 
 ### Requirement: 统一的服务身份
-系统 SHALL 在 MCP `initialize` 响应中声明自身的服务名为字符串 `mcp-server`，版本号为字符串 `0.2.0`；服务名与版本号 MUST NOT 与某个具体工具的名称绑定。
+系统 SHALL 在 MCP `initialize` 响应中声明自身的服务名为字符串 `mcp-server`，版本号为字符串 `0.5.0`；服务名与版本号 MUST NOT 与某个具体工具的名称绑定。
 
 #### Scenario: initialize 返回的服务名
 - **WHEN** 客户端通过 stdio 向可执行文件发送合法的 `initialize` 请求
 - **THEN** 响应的服务信息 MUST 声明服务名 `mcp-server`
-- **AND** 响应的服务信息 MUST 声明版本号 `0.2.0`
+- **AND** 响应的服务信息 MUST 声明版本号 `0.5.0`
 
 #### Scenario: 服务名不绑定具体工具
 - **WHEN** `initialize` 响应被任意一个兼容的 MCP 客户端解析
-- **THEN** 返回的服务名 MUST NOT 为 `mcp-add` 或任何具体工具的名称
+- **THEN** 返回的服务名 MUST NOT 为任何具体工具的名称
 
 ### Requirement: 多工具可扩展注册
 系统 SHALL 支持在同一个运行实例中注册任意数量（>=1）的 MCP 工具，且 `tools/list` 的响应 MUST 正确反映当前所有已注册工具；新增工具 MUST NOT 要求修改与工具无关的其它代码路径。
 
-#### Scenario: 当前仅有 add 工具
+#### Scenario: 返回已启用模块的工具
 - **WHEN** 客户端在 `initialize` 之后调用 `tools/list`
 - **THEN** 响应列表 MUST 至少包含一个条目
-- **AND** 响应列表 MUST 包含 `name` 为 `add` 的条目，其行为与 `mcp-add` 能力下定义的 `add 工具注册` 需求一致
+- **AND** 响应列表 MUST 仅包含当前配置中已启用且已完成初始化的模块所注册的工具
 
-#### Scenario: 未来新增工具不影响 add
+#### Scenario: 未来新增工具不影响现有工具
 - **WHEN** 代码库中新增任意其它工具并注册
-- **THEN** `tools/list` MUST 同时返回 `add` 条目与新工具条目，且 `add` 工具的 `name`、`description`、`inputSchema` MUST 与新增前保持一致
+- **THEN** `tools/list` MUST 同时返回原有工具与新工具，且原有工具的 `name`、`description`、`inputSchema` MUST 与新增前保持一致
 
 ### Requirement: 可执行文件命名与输出位置
-项目构建产物 SHALL 统一输出到仓库根目录下的 `bin/` 子目录，并统一命名：Windows 平台为 `bin/mcp-server.exe`，其它平台为 `bin/mcp-server`；构建产物 MUST NOT 以任何单一工具的名称（例如 `mcp-add`）命名，MUST NOT 直接写入仓库根目录，且 `bin/` 目录 MUST 被纳入版本控制忽略列表。
+项目构建产物 SHALL 统一输出到仓库根目录下的 `bin/` 子目录，并统一命名：Windows 平台为 `bin/mcp-server.exe`，其它平台为 `bin/mcp-server`；构建产物 MUST NOT 以任何单一工具的名称命名，MUST NOT 直接写入仓库根目录，且 `bin/` 目录 MUST 被纳入版本控制忽略列表。
 
 #### Scenario: Windows 构建产物
 - **WHEN** 在 Windows 环境下执行 `go build -o bin/mcp-server.exe .`
@@ -60,4 +60,4 @@
 #### Scenario: main.go 可以加载配置并传递
 - **WHEN** 审阅 `main.go` 的源码
 - **THEN** `main.go` MAY 解析 `--config` flag、调用项目内 `config.Load(path)`、将返回的 `*config.Config` 作为参数传给某些工具的 `Register` 函数
-- **AND** 对配置字段的业务解释（例如根据 `mode` 决定是否允许某类 SQL）MUST 由工具子包自身负责，MUST NOT 出现在 `main.go` 中
+- **AND** 对配置字段的业务解释（例如根据 `write` 决定是否允许写操作）MUST 由工具子包自身负责，MUST NOT 出现在 `main.go` 中

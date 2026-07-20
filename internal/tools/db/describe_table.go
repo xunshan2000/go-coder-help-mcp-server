@@ -13,6 +13,10 @@ var tableNamePattern = regexp.MustCompile(`^[A-Za-z0-9_$]+$`)
 func newDescribeTableTool() mcp.Tool {
 	return mcp.NewTool("db_describe_table",
 		mcp.WithDescription("Describe a table schema and indexes. If you do not know the table name, call db_list_tables first. If you do not know the source, call db_help first."),
+		mcp.WithString("environment",
+			mcp.Description("Environment key, such as pro, local, test1, or another value listed by db_help."),
+			mcp.Required(),
+		),
 		mcp.WithString("source",
 			mcp.Description("Database source key. Call db_help first to see available sources."),
 			mcp.Required(),
@@ -28,6 +32,10 @@ func handleDescribeTable(pool *Pool) func(ctx context.Context, req mcp.CallToolR
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		args := req.GetArguments()
 
+		environment, err := readString(args, "environment")
+		if err != nil {
+			return renderErrorf("%s", err.Error()), nil
+		}
 		sourceName, err := readString(args, "source")
 		if err != nil {
 			return renderErrorf("%s", err.Error()), nil
@@ -40,7 +48,7 @@ func handleDescribeTable(pool *Pool) func(ctx context.Context, req mcp.CallToolR
 			return renderErrorf("invalid table name %q: only letters, numbers, underscore, and dollar sign are allowed", table), nil
 		}
 
-		src, err := pool.Get(sourceName)
+		src, err := pool.Get(environment, sourceName)
 		if err != nil {
 			return renderErrorf("%s", err.Error()), nil
 		}
@@ -50,14 +58,15 @@ func handleDescribeTable(pool *Pool) func(ctx context.Context, req mcp.CallToolR
 
 		schema, err := src.Driver.DescribeTable(queryCtx, src.DB, table)
 		if err != nil {
-			return renderErrorf("describe failed [%s.%s]: %v", src.Key, table, err), nil
+			return renderErrorf("describe failed [%s/%s.%s]: %v", src.Environment, src.Key, table, err), nil
 		}
 
 		return renderJSONResult(map[string]any{
-			"source":  src.Key,
-			"table":   table,
-			"columns": schema.Columns,
-			"indexes": schema.Indexes,
+			"environment": src.Environment,
+			"source":      src.Key,
+			"table":       table,
+			"columns":     schema.Columns,
+			"indexes":     schema.Indexes,
 		}), nil
 	}
 }

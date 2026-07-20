@@ -16,6 +16,10 @@ import (
 func newQueryTool() mcp.Tool {
 	return mcp.NewTool("db_query",
 		mcp.WithDescription("Run read-only SQL on a source. Use this for SELECT, SHOW, DESCRIBE, DESC, EXPLAIN, or WITH. If you do not know the source, call db_help first. If you do not know the table, call db_list_tables first. If you do not know the columns, call db_describe_table first. Multi-statement SQL is not allowed."),
+		mcp.WithString("environment",
+			mcp.Description("Environment key, such as pro, local, test1, or another value listed by db_help."),
+			mcp.Required(),
+		),
 		mcp.WithString("source",
 			mcp.Description("Database source key. Call db_help first to see available sources."),
 			mcp.Required(),
@@ -39,6 +43,7 @@ func handleQuery(pool *Pool, defaults config.Defaults, logger *sqllog.Logger) fu
 		start := time.Now()
 		args := req.GetArguments()
 
+		environmentName, environmentErr := readString(args, "environment")
 		sourceName, sourceErr := readString(args, "source")
 		sqlText, sqlErr := readString(args, "sql")
 		bindings := readAnySlice(args, "args")
@@ -57,6 +62,7 @@ func handleQuery(pool *Pool, defaults config.Defaults, logger *sqllog.Logger) fu
 			}
 			logger.Write(ctx, sqllog.Entry{
 				TS:          sqllog.NowTS(),
+				Environment: environmentName,
 				Source:      sourceName,
 				Mode:        mode,
 				Tool:        "db_query",
@@ -71,6 +77,10 @@ func handleQuery(pool *Pool, defaults config.Defaults, logger *sqllog.Logger) fu
 			})
 		}()
 
+		if environmentErr != nil {
+			errMsg = environmentErr.Error()
+			return renderErrorf("%s", errMsg), nil
+		}
 		if sourceErr != nil {
 			errMsg = sourceErr.Error()
 			return renderErrorf("%s", errMsg), nil
@@ -80,19 +90,17 @@ func handleQuery(pool *Pool, defaults config.Defaults, logger *sqllog.Logger) fu
 			return renderErrorf("%s", errMsg), nil
 		}
 
-		src, err := pool.Get(sourceName)
+		src, err := pool.Get(environmentName, sourceName)
 		if err != nil {
 			errMsg = err.Error()
 			return renderErrorf("%s", errMsg), nil
 		}
-		mode = string(src.Mode)
+		mode = src.auditMode()
 		renderedSQL = src.Driver.RenderSQL(sqlText, bindings)
 
-		if src.Mode == ModeR {
-			if err := AllowReadSQL(sqlText); err != nil {
-				errMsg = fmt.Sprintf("source=%s mode=r: %v", src.Key, err)
-				return renderErrorf("%s", errMsg), nil
-			}
+		if err := AllowReadSQL(sqlText); err != nil {
+			errMsg = fmt.Sprintf("source=%s/%s: %v", src.Environment, src.Key, err)
+			return renderErrorf("%s", errMsg), nil
 		}
 
 		maxRows := defaults.MaxRows
@@ -107,7 +115,7 @@ func handleQuery(pool *Pool, defaults config.Defaults, logger *sqllog.Logger) fu
 
 		columns, rows, rowCount, truncated, execErr := runQuery(queryCtx, src, sqlText, bindings, maxRows)
 		if execErr != nil {
-			errMsg = fmt.Sprintf("query failed [%s]: %v", src.Key, execErr)
+			errMsg = fmt.Sprintf("query failed [%s/%s]: %v", src.Environment, src.Key, execErr)
 			return renderErrorf("%s", errMsg), nil
 		}
 
@@ -118,11 +126,12 @@ func handleQuery(pool *Pool, defaults config.Defaults, logger *sqllog.Logger) fu
 		okFlag = true
 
 		return renderJSONResult(map[string]any{
-			"source":    src.Key,
-			"columns":   columns,
-			"rows":      rows,
-			"row_count": rowCount,
-			"truncated": truncated,
+			"environment": src.Environment,
+			"source":      src.Key,
+			"columns":     columns,
+			"rows":        rows,
+			"row_count":   rowCount,
+			"truncated":   truncated,
 		}), nil
 	}
 }
@@ -131,20 +140,16 @@ func runQuery(ctx context.Context, src *Source, sqlText string, bindings []any, 
 	var sqlRows *sql.Rows
 	var roExec driver.ReadOnlyExec
 
-	if src.Mode == ModeR {
-		roExec, err = src.Driver.BeginReadOnly(ctx, src.DB)
-		if err != nil {
-			return nil, nil, 0, false, fmt.Errorf("begin read-only context failed: %w", err)
-		}
-		defer func() {
-			if roExec != nil {
-				_ = roExec.Rollback()
-			}
-		}()
-		sqlRows, err = roExec.QueryContext(ctx, sqlText, bindings...)
-	} else {
-		sqlRows, err = src.DB.QueryContext(ctx, sqlText, bindings...)
+	roExec, err = src.Driver.BeginReadOnly(ctx, src.DB)
+	if err != nil {
+		return nil, nil, 0, false, fmt.Errorf("begin read-only context failed: %w", err)
 	}
+	defer func() {
+		if roExec != nil {
+			_ = roExec.Rollback()
+		}
+	}()
+	sqlRows, err = roExec.QueryContext(ctx, sqlText, bindings...)
 	if err != nil {
 		return nil, nil, 0, false, err
 	}
@@ -177,7 +182,7 @@ func runQuery(ctx context.Context, src *Source, sqlText string, bindings []any, 
 
 	rowCount = len(rows)
 
-	if src.Mode == ModeR && roExec != nil {
+	if roExec != nil {
 		if cerr := roExec.Commit(); cerr != nil {
 			return nil, nil, 0, false, fmt.Errorf("read-only commit failed: %w", cerr)
 		}

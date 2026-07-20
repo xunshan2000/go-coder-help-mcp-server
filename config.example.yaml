@@ -4,56 +4,90 @@ defaults:
   max_rows: 100
   query_timeout: 30s
 
-databases:
-  default:
-    driver: mysql
-    host: 127.0.0.1
-    port: 3306
-    database: app
-    username: app
-    password: changeme
-    charset: utf8mb4
-    collation: utf8mb4_unicode_ci
-    timezone: UTC
-    mode: rw
-    params:
-      parseTime: "true"
-    pool:
-      max_connections: 10
-      min_connections: 2
-      connect_timeout: 10s
-      max_idle_time: 60s
+# All switches default to true when omitted.
+features:
+  database: true
+  redis: true
+  apipost: true
+  sql_audit: true
 
-  reporting:
-    driver: mysql
-    host: 127.0.0.1
-    port: 3306
-    database: app
-    username: ro
-    password: ro_changeme
-    mode: r
-    pool:
-      max_connections: 5
-      min_connections: 1
+environments:
+  # Environment names are free-form: pro/local/test1/test2/staging-cn are all valid.
+  pro:
+    databases:
+      platform:
+        driver: mysql
+        host: mysql.internal
+        port: 3306
+        database: platform
+        username: app
+        password: changeme
+        charset: utf8mb4
+        collation: utf8mb4_unicode_ci
+        timezone: UTC
+        write: true
+        params:
+          parseTime: "true"
+        pool:
+          max_connections: 10
+          min_connections: 2
+          connect_timeout: 10s
+          max_idle_time: 60s
 
-redis:
-  # Redis sources support read tools plus writes for string/hash/list/set/zset.
-  # Write permission is controlled by the Redis account/ACL configured here.
-  redis:
-    host: 127.0.0.1
-    port: 6379
-    auth: changeme
-    index: 0
-    dial_timeout: 5s
-    read_timeout: 5s
+        # Optional SSH tunnel. Relative file paths are resolved from this config file.
+        # ssh:
+        #   host: bastion.example.com
+        #   port: 22
+        #   username: deploy
+        #   private_key: .ssh/id_ed25519
+        #   private_key_passphrase: ""
+        #   password: "" # Alternative to private_key.
+        #   known_hosts: .ssh/known_hosts
+        #   connect_timeout: 10s
+        #   insecure_skip_host_key: false
 
-  hw_redis:
-    host: 127.0.0.1
-    port: 6379
-    auth: changeme
-    index: 6
-    dial_timeout: 5s
-    read_timeout: 5s
+    redis:
+      cache:
+        host: redis.internal
+        port: 6379
+        auth: changeme
+        index: 0
+        write: true
+        dial_timeout: 5s
+        read_timeout: 5s
+        # Redis supports the same optional SSH fields as MySQL.
+        # ssh:
+        #   host: bastion.example.com
+        #   port: 22
+        #   username: deploy
+        #   private_key: .ssh/id_ed25519
+        #   known_hosts: .ssh/known_hosts
+        #   connect_timeout: 10s
+
+  local:
+    databases:
+      # The same logical source name can be reused in another environment.
+      platform:
+        driver: mysql
+        host: 127.0.0.1
+        port: 3306
+        database: platform
+        username: local_app
+        password: local_changeme
+        write: false
+        pool:
+          max_connections: 5
+          min_connections: 1
+
+    redis:
+      cache:
+        host: 127.0.0.1
+        port: 6379
+        auth: local_changeme
+        index: 0
+        write: false
+        dial_timeout: 5s
+        read_timeout: 5s
 
 # Optional Apipost integration.
 # If omitted, apipost_* tools will not be registered.

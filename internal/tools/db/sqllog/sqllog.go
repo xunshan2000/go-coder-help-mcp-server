@@ -18,6 +18,7 @@ import (
 // omitempty 区分"未参与该工具"与"零值"。
 type Entry struct {
 	TS           string `json:"ts"`
+	Environment  string `json:"environment"`
 	Source       string `json:"source"`
 	Mode         string `json:"mode"`
 	Tool         string `json:"tool"`

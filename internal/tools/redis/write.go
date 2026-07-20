@@ -13,6 +13,7 @@ import (
 func newSetTool(pool *Pool) mcp.Tool {
 	return mcp.NewTool("redis_set",
 		mcp.WithDescription(fmt.Sprintf("Set a Redis string key. Optionally set an expiration with ttl_seconds. %s", sourceSummary(pool))),
+		environmentOption(),
 		mcp.WithString("source",
 			mcp.Description("Redis source key. Required. Call redis_help first to see available sources."),
 			mcp.Required(),
@@ -34,6 +35,7 @@ func newSetTool(pool *Pool) mcp.Tool {
 func newDeleteTool(pool *Pool) mcp.Tool {
 	return mcp.NewTool("redis_delete",
 		mcp.WithDescription(fmt.Sprintf("Delete one Redis key. Returns the number of keys removed, 0 or 1. %s", sourceSummary(pool))),
+		environmentOption(),
 		mcp.WithString("source",
 			mcp.Description("Redis source key. Required. Call redis_help first to see available sources."),
 			mcp.Required(),
@@ -48,6 +50,7 @@ func newDeleteTool(pool *Pool) mcp.Tool {
 func newHSetTool(pool *Pool) mcp.Tool {
 	return mcp.NewTool("redis_hset",
 		mcp.WithDescription(fmt.Sprintf("Set one or more Redis hash fields. %s", sourceSummary(pool))),
+		environmentOption(),
 		mcp.WithString("source",
 			mcp.Description("Redis source key. Required. Call redis_help first to see available sources."),
 			mcp.Required(),
@@ -66,6 +69,7 @@ func newHSetTool(pool *Pool) mcp.Tool {
 func newHDelTool(pool *Pool) mcp.Tool {
 	return mcp.NewTool("redis_hdel",
 		mcp.WithDescription(fmt.Sprintf("Delete one or more fields from a Redis hash. %s", sourceSummary(pool))),
+		environmentOption(),
 		mcp.WithString("source",
 			mcp.Description("Redis source key. Required. Call redis_help first to see available sources."),
 			mcp.Required(),
@@ -93,6 +97,7 @@ func newRPushTool(pool *Pool) mcp.Tool {
 func newListPushTool(pool *Pool, name, description, side string) mcp.Tool {
 	return mcp.NewTool(name,
 		mcp.WithDescription(fmt.Sprintf("%s %s", description, sourceSummary(pool))),
+		environmentOption(),
 		mcp.WithString("source",
 			mcp.Description("Redis source key. Required. Call redis_help first to see available sources."),
 			mcp.Required(),
@@ -112,6 +117,7 @@ func newListPushTool(pool *Pool, name, description, side string) mcp.Tool {
 func newSAddTool(pool *Pool) mcp.Tool {
 	return mcp.NewTool("redis_sadd",
 		mcp.WithDescription(fmt.Sprintf("Add one or more members to a Redis set. %s", sourceSummary(pool))),
+		environmentOption(),
 		mcp.WithString("source",
 			mcp.Description("Redis source key. Required. Call redis_help first to see available sources."),
 			mcp.Required(),
@@ -131,6 +137,7 @@ func newSAddTool(pool *Pool) mcp.Tool {
 func newSRemTool(pool *Pool) mcp.Tool {
 	return mcp.NewTool("redis_srem",
 		mcp.WithDescription(fmt.Sprintf("Remove one or more members from a Redis set. %s", sourceSummary(pool))),
+		environmentOption(),
 		mcp.WithString("source",
 			mcp.Description("Redis source key. Required. Call redis_help first to see available sources."),
 			mcp.Required(),
@@ -150,6 +157,7 @@ func newSRemTool(pool *Pool) mcp.Tool {
 func newZAddTool(pool *Pool) mcp.Tool {
 	return mcp.NewTool("redis_zadd",
 		mcp.WithDescription(fmt.Sprintf("Add or update one or more members in a Redis sorted set. %s", sourceSummary(pool))),
+		environmentOption(),
 		mcp.WithString("source",
 			mcp.Description("Redis source key. Required. Call redis_help first to see available sources."),
 			mcp.Required(),
@@ -168,6 +176,7 @@ func newZAddTool(pool *Pool) mcp.Tool {
 func newZRemTool(pool *Pool) mcp.Tool {
 	return mcp.NewTool("redis_zrem",
 		mcp.WithDescription(fmt.Sprintf("Remove one or more members from a Redis sorted set. %s", sourceSummary(pool))),
+		environmentOption(),
 		mcp.WithString("source",
 			mcp.Description("Redis source key. Required. Call redis_help first to see available sources."),
 			mcp.Required(),
@@ -188,6 +197,10 @@ func handleSet(pool *Pool) func(ctx context.Context, req mcp.CallToolRequest) (*
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		args := req.GetArguments()
 
+		environment, err := readRequiredString(args, "environment")
+		if err != nil {
+			return renderErrorf("%s", err), nil
+		}
 		sourceName, err := readRequiredString(args, "source")
 		if err != nil {
 			return renderErrorf("%s", err), nil
@@ -205,7 +218,7 @@ func handleSet(pool *Pool) func(ctx context.Context, req mcp.CallToolRequest) (*
 			return renderErrorf("%s", err), nil
 		}
 
-		src, err := pool.Get(sourceName)
+		src, err := pool.GetWritable(environment, sourceName)
 		if err != nil {
 			return renderErrorf("%s", err), nil
 		}
@@ -216,17 +229,18 @@ func handleSet(pool *Pool) func(ctx context.Context, req mcp.CallToolRequest) (*
 		}
 		reply, err := src.Do(ctx, cmd...)
 		if err != nil {
-			return renderErrorf("redis set failed [%s.%s]: %v", src.Key, key, err), nil
+			return renderErrorf("redis set failed [%s/%s.%s]: %v", src.Environment, src.Key, key, err), nil
 		}
 		status, err := asString(reply)
 		if err != nil {
-			return renderErrorf("redis set reply decode failed [%s.%s]: %v", src.Key, key, err), nil
+			return renderErrorf("redis set reply decode failed [%s/%s.%s]: %v", src.Environment, src.Key, key, err), nil
 		}
 		if status != "OK" {
-			return renderErrorf("redis set failed [%s.%s]: unexpected reply %q", src.Key, key, status), nil
+			return renderErrorf("redis set failed [%s/%s.%s]: unexpected reply %q", src.Environment, src.Key, key, status), nil
 		}
 
 		return renderJSONResult(map[string]any{
+			"environment": src.Environment,
 			"source":      src.Key,
 			"key":         key,
 			"ok":          true,
@@ -239,6 +253,10 @@ func handleDelete(pool *Pool) func(ctx context.Context, req mcp.CallToolRequest)
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		args := req.GetArguments()
 
+		environment, err := readRequiredString(args, "environment")
+		if err != nil {
+			return renderErrorf("%s", err), nil
+		}
 		sourceName, err := readRequiredString(args, "source")
 		if err != nil {
 			return renderErrorf("%s", err), nil
@@ -248,31 +266,32 @@ func handleDelete(pool *Pool) func(ctx context.Context, req mcp.CallToolRequest)
 			return renderErrorf("%s", err), nil
 		}
 
-		src, err := pool.Get(sourceName)
+		src, err := pool.GetWritable(environment, sourceName)
 		if err != nil {
 			return renderErrorf("%s", err), nil
 		}
 
 		reply, err := src.Do(ctx, "DEL", key)
 		if err != nil {
-			return renderErrorf("redis delete failed [%s.%s]: %v", src.Key, key, err), nil
+			return renderErrorf("redis delete failed [%s/%s.%s]: %v", src.Environment, src.Key, key, err), nil
 		}
 		deleted, err := asInt64(reply)
 		if err != nil {
-			return renderErrorf("redis delete reply decode failed [%s.%s]: %v", src.Key, key, err), nil
+			return renderErrorf("redis delete reply decode failed [%s/%s.%s]: %v", src.Environment, src.Key, key, err), nil
 		}
 
 		return renderJSONResult(map[string]any{
-			"source":  src.Key,
-			"key":     key,
-			"deleted": deleted,
+			"environment": src.Environment,
+			"source":      src.Key,
+			"key":         key,
+			"deleted":     deleted,
 		}), nil
 	}
 }
 
 func handleHSet(pool *Pool) func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		sourceName, key, args, err := readSourceKeyArgs(req)
+		environment, sourceName, key, args, err := readSourceKeyArgs(req)
 		if err != nil {
 			return renderErrorf("%s", err), nil
 		}
@@ -280,7 +299,7 @@ func handleHSet(pool *Pool) func(ctx context.Context, req mcp.CallToolRequest) (
 		if err != nil {
 			return renderErrorf("%s", err), nil
 		}
-		src, err := pool.Get(sourceName)
+		src, err := pool.GetWritable(environment, sourceName)
 		if err != nil {
 			return renderErrorf("%s", err), nil
 		}
@@ -293,7 +312,7 @@ func handleHSet(pool *Pool) func(ctx context.Context, req mcp.CallToolRequest) (
 		if err != nil {
 			return renderErrorf("%s", err), nil
 		}
-		return renderJSONResult(map[string]any{"source": src.Key, "key": key, "fields_changed": changed}), nil
+		return renderJSONResult(map[string]any{"environment": src.Environment, "source": src.Key, "key": key, "fields_changed": changed}), nil
 	}
 }
 
@@ -311,7 +330,7 @@ func handleRPush(pool *Pool) func(ctx context.Context, req mcp.CallToolRequest) 
 
 func handleListPush(pool *Pool, command, op string) func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		sourceName, key, args, err := readSourceKeyArgs(req)
+		environment, sourceName, key, args, err := readSourceKeyArgs(req)
 		if err != nil {
 			return renderErrorf("%s", err), nil
 		}
@@ -319,7 +338,7 @@ func handleListPush(pool *Pool, command, op string) func(ctx context.Context, re
 		if err != nil {
 			return renderErrorf("%s", err), nil
 		}
-		src, err := pool.Get(sourceName)
+		src, err := pool.GetWritable(environment, sourceName)
 		if err != nil {
 			return renderErrorf("%s", err), nil
 		}
@@ -329,7 +348,7 @@ func handleListPush(pool *Pool, command, op string) func(ctx context.Context, re
 		if err != nil {
 			return renderErrorf("%s", err), nil
 		}
-		return renderJSONResult(map[string]any{"source": src.Key, "key": key, "length": length}), nil
+		return renderJSONResult(map[string]any{"environment": src.Environment, "source": src.Key, "key": key, "length": length}), nil
 	}
 }
 
@@ -343,7 +362,7 @@ func handleSRem(pool *Pool) func(ctx context.Context, req mcp.CallToolRequest) (
 
 func handleZAdd(pool *Pool) func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		sourceName, key, args, err := readSourceKeyArgs(req)
+		environment, sourceName, key, args, err := readSourceKeyArgs(req)
 		if err != nil {
 			return renderErrorf("%s", err), nil
 		}
@@ -351,7 +370,7 @@ func handleZAdd(pool *Pool) func(ctx context.Context, req mcp.CallToolRequest) (
 		if err != nil {
 			return renderErrorf("%s", err), nil
 		}
-		src, err := pool.Get(sourceName)
+		src, err := pool.GetWritable(environment, sourceName)
 		if err != nil {
 			return renderErrorf("%s", err), nil
 		}
@@ -364,7 +383,7 @@ func handleZAdd(pool *Pool) func(ctx context.Context, req mcp.CallToolRequest) (
 		if err != nil {
 			return renderErrorf("%s", err), nil
 		}
-		return renderJSONResult(map[string]any{"source": src.Key, "key": key, "members_changed": changed}), nil
+		return renderJSONResult(map[string]any{"environment": src.Environment, "source": src.Key, "key": key, "members_changed": changed}), nil
 	}
 }
 
@@ -374,7 +393,7 @@ func handleZRem(pool *Pool) func(ctx context.Context, req mcp.CallToolRequest) (
 
 func handleMemberWrite(pool *Pool, command, argName, resultName, op string) func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		sourceName, key, args, err := readSourceKeyArgs(req)
+		environment, sourceName, key, args, err := readSourceKeyArgs(req)
 		if err != nil {
 			return renderErrorf("%s", err), nil
 		}
@@ -382,7 +401,7 @@ func handleMemberWrite(pool *Pool, command, argName, resultName, op string) func
 		if err != nil {
 			return renderErrorf("%s", err), nil
 		}
-		src, err := pool.Get(sourceName)
+		src, err := pool.GetWritable(environment, sourceName)
 		if err != nil {
 			return renderErrorf("%s", err), nil
 		}
@@ -392,7 +411,7 @@ func handleMemberWrite(pool *Pool, command, argName, resultName, op string) func
 		if err != nil {
 			return renderErrorf("%s", err), nil
 		}
-		return renderJSONResult(map[string]any{"source": src.Key, "key": key, resultName: changed}), nil
+		return renderJSONResult(map[string]any{"environment": src.Environment, "source": src.Key, "key": key, resultName: changed}), nil
 	}
 }
 
@@ -434,17 +453,21 @@ func maxInt() int {
 	return int(^uint(0) >> 1)
 }
 
-func readSourceKeyArgs(req mcp.CallToolRequest) (string, string, map[string]any, error) {
+func readSourceKeyArgs(req mcp.CallToolRequest) (string, string, string, map[string]any, error) {
 	args := req.GetArguments()
+	environment, err := readRequiredString(args, "environment")
+	if err != nil {
+		return "", "", "", nil, err
+	}
 	sourceName, err := readRequiredString(args, "source")
 	if err != nil {
-		return "", "", nil, err
+		return "", "", "", nil, err
 	}
 	key, err := readRequiredString(args, "key")
 	if err != nil {
-		return "", "", nil, err
+		return "", "", "", nil, err
 	}
-	return sourceName, key, args, nil
+	return environment, sourceName, key, args, nil
 }
 
 func readStringSlice(args map[string]any, name string) ([]string, error) {
@@ -534,11 +557,11 @@ func sortedKeys[V any](m map[string]V) []string {
 func doIntWrite(ctx context.Context, src *Source, key string, cmd []string, op string) (int64, error) {
 	reply, err := src.Do(ctx, cmd...)
 	if err != nil {
-		return 0, fmt.Errorf("%s failed [%s.%s]: %v", op, src.Key, key, err)
+		return 0, fmt.Errorf("%s failed [%s/%s.%s]: %v", op, src.Environment, src.Key, key, err)
 	}
 	n, err := asInt64(reply)
 	if err != nil {
-		return 0, fmt.Errorf("%s reply decode failed [%s.%s]: %v", op, src.Key, key, err)
+		return 0, fmt.Errorf("%s reply decode failed [%s/%s.%s]: %v", op, src.Environment, src.Key, key, err)
 	}
 	return n, nil
 }

@@ -11,6 +11,7 @@ import (
 func newScanKeysTool(pool *Pool) mcp.Tool {
 	return mcp.NewTool("redis_scan_keys",
 		mcp.WithDescription(fmt.Sprintf("Scan keys in a Redis source using SCAN in read-only mode. Prefer this over KEYS for discovery. Returns keys plus next_cursor; continue scanning until next_cursor is \"0\". %s", sourceSummary(pool))),
+		environmentOption(),
 		mcp.WithString("source",
 			mcp.Description("Redis source key. Required. Call redis_help first to see available sources."),
 			mcp.Required(),
@@ -31,11 +32,15 @@ func handleScanKeys(pool *Pool) func(ctx context.Context, req mcp.CallToolReques
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		args := req.GetArguments()
 
+		environment, err := readRequiredString(args, "environment")
+		if err != nil {
+			return renderErrorf("%s", err), nil
+		}
 		sourceName, err := readRequiredString(args, "source")
 		if err != nil {
 			return renderErrorf("%s", err), nil
 		}
-		src, err := pool.Get(sourceName)
+		src, err := pool.Get(environment, sourceName)
 		if err != nil {
 			return renderErrorf("%s", err), nil
 		}
@@ -46,27 +51,28 @@ func handleScanKeys(pool *Pool) func(ctx context.Context, req mcp.CallToolReques
 
 		reply, err := src.Do(ctx, "SCAN", cursor, "MATCH", pattern, "COUNT", strconv.Itoa(count))
 		if err != nil {
-			return renderErrorf("redis scan failed [%s]: %v", src.Key, err), nil
+			return renderErrorf("redis scan failed [%s/%s]: %v", src.Environment, src.Key, err), nil
 		}
 
 		arr, err := asArray(reply)
 		if err != nil {
-			return renderErrorf("redis scan reply decode failed [%s]: %v", src.Key, err), nil
+			return renderErrorf("redis scan reply decode failed [%s/%s]: %v", src.Environment, src.Key, err), nil
 		}
 		if len(arr) != 2 {
-			return renderErrorf("redis scan reply decode failed [%s]: expected 2 items, got %d", src.Key, len(arr)), nil
+			return renderErrorf("redis scan reply decode failed [%s/%s]: expected 2 items, got %d", src.Environment, src.Key, len(arr)), nil
 		}
 
 		nextCursor, err := asString(arr[0])
 		if err != nil {
-			return renderErrorf("redis scan reply decode failed [%s]: %v", src.Key, err), nil
+			return renderErrorf("redis scan reply decode failed [%s/%s]: %v", src.Environment, src.Key, err), nil
 		}
 		keys, err := toStringSlice(arr[1])
 		if err != nil {
-			return renderErrorf("redis scan keys decode failed [%s]: %v", src.Key, err), nil
+			return renderErrorf("redis scan keys decode failed [%s/%s]: %v", src.Environment, src.Key, err), nil
 		}
 
 		return renderJSONResult(map[string]any{
+			"environment": src.Environment,
 			"source":      src.Key,
 			"pattern":     pattern,
 			"cursor":      cursor,

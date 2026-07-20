@@ -27,32 +27,53 @@
 - **AND** stderr MUST 输出定位到行号或字段名的错误信息
 
 ### Requirement: 多数据源字段化配置
-配置文件 `databases` 顶层 SHALL 为 YAML map，map 的 key 即数据源标识符（后续工具调用通过 `source: "<key>"` 引用）。每个数据源 value MUST 包含字段 `driver`、`host`、`database`、`username`、`mode`；字段 `port`、`password`、`charset`、`collation`、`timezone`、`params`、`pool` 为可选。`mode` 的取值 MUST 为 `r` 或 `rw` 之一；`driver` 字段 MUST 非空（运行时是否受支持由"驱动注册校验"需求决定）；map key（source 标识符）MUST 非空；校验失败 MUST 立即使进程启动失败。
+配置文件 SHALL 使用顶层 `environments` YAML map 定义环境；环境 key 是自由字符串（例如 `pro`、`local`、`test1`、`test2`），MUST NOT 由程序写死枚举。每个环境下的 `databases` 为数据源 map，其 key 是该环境内的数据源标识符；同一 source key MAY 在多个环境中重复。工具调用通过 `environment: "<env>"` 与 `source: "<key>"` 联合定位。每个数据库数据源 MUST 包含字段 `driver`、`host`、`database`、`username`；字段 `port`、`password`、`charset`、`collation`、`timezone`、`write`、`params`、`pool` 为可选。`write` MUST 为布尔值，省略时默认 `false`（只读）。
 
 #### Scenario: 合法的多源字段化配置
-- **WHEN** 配置 `databases` 下含 `primary: {driver: mysql, host: ..., database: app, username: app, password: ..., mode: rw, ...}` 与 `reporting: {driver: mysql, host: ..., database: app, username: ro, password: ..., mode: r, ...}`
+- **WHEN** 配置 `environments.pro.databases.platform` 与 `environments.local.databases.platform` 两个同名 source，分别指向线上与本地 MySQL
 - **THEN** 启动成功
-- **AND** 工具调用时传入 `source: "primary"` 或 `source: "reporting"` 可分别访问对应数据源
+- **AND** 工具调用时传入 `environment: "pro", source: "platform"` 或 `environment: "local", source: "platform"` MUST 分别访问对应数据源
+
+#### Scenario: 自定义环境名
+- **WHEN** 配置包含 `environments.test1` 与 `environments.test2`
+- **THEN** 两个环境 MUST 被原样加载并出现在帮助工具输出中
+- **AND** 系统 MUST NOT 限制环境名只能是 `pro` 或 `local`
 
 #### Scenario: 缺失必填字段
-- **WHEN** 配置中某数据源缺少 `host`（或 `database` / `username` / `mode` / `driver` 中的任一项）
+- **WHEN** 配置中某数据源缺少 `host`（或 `database` / `username` / `driver` 中的任一项）
 - **THEN** 进程 MUST 启动失败
 - **AND** 错误信息 MUST 指明出错的 source key 与缺失的字段名
 
 #### Scenario: map key 为空字符串
-- **WHEN** 配置中出现 `databases: { "": {driver: mysql, ...} }`
+- **WHEN** 配置中出现 `environments.pro.databases: { "": {driver: mysql, ...} }`
 - **THEN** 进程 MUST 启动失败
 - **AND** 错误信息 MUST 指明"source key 不能为空"
 
-#### Scenario: 非法的 mode 值
-- **WHEN** 某数据源的 `mode` 被写成 `readonly`、`w`、空字符串等非 `r/rw` 值
-- **THEN** 进程 MUST 启动失败
-- **AND** 错误信息 MUST 指明非法值与所在 source key，且 MUST 明示允许取值集合为 `{r, rw}`
+#### Scenario: 省略 write 默认只读
+- **WHEN** 某数据源未配置 `write`
+- **THEN** 该数据源 MUST 允许读工具调用
+- **AND** 该数据源 MUST 拒绝写工具调用
 
-#### Scenario: 空 databases
-- **WHEN** 配置中 `databases` 为空 map 或完全省略
+#### Scenario: 显式开启写权限
+- **WHEN** 某数据源配置 `write: true`
+- **THEN** 该数据源 SHALL 允许对应写工具调用
+
+### Requirement: Redis 数据源写开关
+每个 `environments.<env>.redis.<key>` 数据源 SHALL 支持可选布尔字段 `write`，省略时默认 `false`。读工具 MUST 对所有合法 Redis 数据源可用；写工具 MUST 仅允许配置了 `write: true` 的数据源执行。Redis 工具 MUST 使用 `environment` 与 `source` 联合定位数据源。
+
+#### Scenario: Redis 默认只读
+- **WHEN** `environments.pro.redis.cache` 未配置 `write`
+- **THEN** `redis_scan_keys` 与 `redis_get` SHALL 可使用该数据源
+- **AND** 所有 Redis 写操作 MUST 拒绝该数据源
+
+#### Scenario: Redis 显式允许写入
+- **WHEN** `environments.pro.redis.cache.write` 为 `true`
+- **THEN** Redis 写工具 SHALL 允许使用 `environment: "pro", source: "cache"`
+
+#### Scenario: 没有任何已启用的数据源或集成
+- **WHEN** 所有环境都不含数据库或 Redis，且 Apipost 也未配置或被关闭
 - **THEN** 进程 MUST 启动失败
-- **AND** 错误信息 MUST 指明"至少需要一个数据源"
+- **AND** 错误信息 MUST 指明至少需要一个已启用功能
 
 #### Scenario: 省略 port 使用驱动缺省值（MySQL）
 - **WHEN** 数据源 `driver: mysql` 配置省略 `port` 字段
@@ -96,7 +117,7 @@
 - **AND** 进程不得因此失败
 
 ### Requirement: 敏感信息脱敏
-系统 MUST NOT 在任何日志、启动信息或错误输出中打印 `password` 字段的内容、`params` 中的键值、或完整组装后的 DSN 字符串。启动成功后打印的每个 source 信息 SHALL 至多包含 `key`、`driver`、`mode`、`host:port`、`database`。
+系统 MUST NOT 在任何日志、启动信息或错误输出中打印 `password` 字段的内容、`params` 中的键值、或完整组装后的 DSN 字符串。启动成功后打印的每个 source 信息 SHALL 至多包含 `key`、`driver`、`write`、`host:port`、`database`。
 
 #### Scenario: 启动日志不泄漏密码
 - **WHEN** 某数据源配置 `password: "hunter2"` 并成功启动
@@ -145,7 +166,7 @@
 
 #### Scenario: 所有数据源可达
 - **WHEN** 所有已配置 source 的 Ping 均成功
-- **THEN** 进程启动成功，stderr 输出每个 source 的 key / driver / mode / host:port / database 的启动日志（不含 DSN / password）
+- **THEN** 进程启动成功，stderr 输出每个 source 的 key / driver / write / host:port / database 的启动日志（不含 DSN / password）
 
 #### Scenario: 某数据源 Ping 失败
 - **WHEN** 配置中某个 source 的字段组合指向一个不可达的数据库实例
