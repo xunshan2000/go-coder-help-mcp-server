@@ -438,6 +438,65 @@ func TestExampleConfigLoads(t *testing.T) {
 	}
 }
 
+func TestLoadScopedFiltersBeforeValidation(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	raw := `
+environments:
+  local:
+    databases:
+      platform:
+        driver: mysql
+        host: localhost
+        database: platform
+        username: app
+  product:
+    databases:
+      broken: {}
+    redis:
+      broken: {}
+apipost:
+  base_url: invalid
+`
+	if err := os.WriteFile(configPath, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := LoadScoped(configPath, LoadOptions{
+		Environment: "local",
+		Database:    true,
+	})
+	if err != nil {
+		t.Fatalf("LoadScoped: %v", err)
+	}
+	if len(cfg.Environments) != 1 || !cfg.HasDatabases() {
+		t.Fatalf("unexpected scoped environments: %+v", cfg.Environments)
+	}
+	if cfg.HasRedis() || cfg.Apipost != nil {
+		t.Fatal("inactive modules were retained")
+	}
+}
+
+func TestLoadScopedRejectsUnknownEnvironment(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	raw := `
+environments:
+  local:
+    databases:
+      platform:
+        driver: mysql
+        host: localhost
+        database: platform
+        username: app
+`
+	if err := os.WriteFile(configPath, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := LoadScoped(configPath, LoadOptions{Environment: "product", Database: true})
+	if err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("LoadScoped error = %v", err)
+	}
+}
+
 func TestValidateApipost_MissingSectionIsFine(t *testing.T) {
 	c := base()
 	c.Apipost = nil

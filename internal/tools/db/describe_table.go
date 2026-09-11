@@ -56,7 +56,11 @@ func handleDescribeTable(pool *Pool) func(ctx context.Context, req mcp.CallToolR
 		queryCtx, cancel := context.WithTimeout(ctx, src.QueryTimeout)
 		defer cancel()
 
-		schema, err := src.Driver.DescribeTable(queryCtx, src.DB, table)
+		database, err := src.database(queryCtx)
+		if err != nil {
+			return renderErrorf("connect failed [%s/%s]: %v", src.Environment, src.Key, err), nil
+		}
+		schema, err := src.Driver.DescribeTable(queryCtx, database, table)
 		if err != nil {
 			return renderErrorf("describe failed [%s/%s.%s]: %v", src.Environment, src.Key, table, err), nil
 		}

@@ -83,7 +83,14 @@ GOPROXY=https://goproxy.cn,direct go build -o bin/mcp-server.exe .
 
 ## 配置
 
-服务启动必须有一份 YAML 配置。通过 `--config <path>` 指定，缺省路径 `./config.yaml`。从 `config.example.yaml` 复制一份开始：
+服务启动必须有一份 YAML 配置。通过 `--config <path>` 指定，缺省路径 `./config.yaml`。同一个可执行文件可以通过启动参数只注册指定模块和环境：
+
+| 参数 | 缺省 | 说明 |
+| --- | --- | --- |
+| `--module` | `all` | 注册 `all`、`mysql`、`redis` 或 `apipost` 工具 |
+| `--env` | 全部环境 | 只保留指定环境；适用于 `mysql` 和 `redis`，不能与 `apipost` 一起使用 |
+
+从 `config.example.yaml` 复制一份开始：
 
 ```bash
 cp config.example.yaml config.yaml
@@ -91,14 +98,23 @@ cp config.example.yaml config.yaml
 ./bin/mcp-server.exe --config ./config.yaml
 ```
 
+例如，下面两个命令使用同一个 exe 和同一个配置文件，但会启动两个相互隔离的 MCP 进程：
+
+```bash
+./bin/mcp-server.exe --config ./config.yaml --module mysql --env product
+./bin/mcp-server.exe --config ./config.yaml --module mysql --env local
+```
+
+指定模块和环境时，程序会在默认值处理和配置校验之前丢弃其他模块及环境，不会为它们创建连接池或 SSH 隧道。未传 `--module` 和 `--env` 时保持原有行为，注册配置中全部启用的工具。
+
 ### 字段说明（通用）
 
 | 字段 | 必填 | 缺省 | 说明 |
 | --- | --- | --- | --- |
 | `defaults.max_rows` | 否 | `100` | `db_query` 的行数上限；调用端 `max_rows` 参数只能降低不能抬高 |
 | `defaults.query_timeout` | 否 | `30s` | 单次 SQL 超时（Go `time.Duration` 格式） |
-| `features.database` | 否 | `true` | 是否初始化数据库连接并注册 `db_*` 工具 |
-| `features.redis` | 否 | `true` | 是否初始化 Redis 连接并注册 `redis_*` 工具 |
+| `features.database` | 否 | `true` | 是否注册数据库数据源和 `db_*` 工具 |
+| `features.redis` | 否 | `true` | 是否注册 Redis 数据源和 `redis_*` 工具 |
 | `features.apipost` | 否 | `true` | 是否初始化 Apipost 客户端并注册 `apipost_*` 工具 |
 | `features.sql_audit` | 否 | `true` | 是否写 SQL 审计日志；不影响 `db_*` 工具注册 |
 | `environments.<env>` | 是 | — | 环境名，自由字符串，例如 `pro`、`local`、`test1`、`test2` |
@@ -120,7 +136,9 @@ cp config.example.yaml config.yaml
 | `environments.<env>.redis.<key>.read_timeout` | 否 | `5s` | 单次命令读写 deadline |
 | `environments.<env>.redis.<key>.ssh` | 否 | — | SSH 隧道；字段与 MySQL 的 `ssh` 配置一致 |
 
-模块开关未配置时默认开启。显式设为 `false` 后，该模块的配置校验、网络初始化和工具注册都会跳过，便于保留暂时停用的连接配置。
+模块开关未配置时默认开启。显式设为 `false` 后，该模块的配置校验、数据源注册和工具注册都会跳过，便于保留暂时停用的连接配置。
+
+数据库、Redis 和 SSH 隧道均采用懒连接：MCP 启动只校验配置并注册数据源，不探测业务端点；首次调用具体数据源时才建立连接。某个数据源不可达只会让该次工具调用返回错误，不会阻止 MCP 启动，也不会影响其他数据源。网络恢复后，后续调用会重新建连。
 
 ### 环境维度
 
@@ -140,7 +158,7 @@ cp config.example.yaml config.yaml
 
 ### MySQL / Redis SSH 隧道
 
-每个 MySQL 或 Redis 数据源可配置独立的 `ssh` 段。启用后，服务先连接 SSH 跳板机，在本机创建仅监听 `127.0.0.1` 的临时端口，再通过该端口访问原始 `host:port`。
+每个 MySQL 或 Redis 数据源可配置独立的 `ssh` 段。首次调用该数据源时，服务连接 SSH 跳板机，在本机创建仅监听 `127.0.0.1` 的临时端口，再通过该端口访问原始 `host:port`。
 
 ```yaml
 environments:
@@ -172,7 +190,7 @@ environments:
 | --- | --- | --- |
 | `pool.max_connections` | `10` | `SetMaxOpenConns` |
 | `pool.min_connections` | `0` | `SetMaxIdleConns`（见下方脚注） |
-| `pool.connect_timeout` | `10s` | 启动 Ping 超时 + MySQL DSN `timeout` |
+| `pool.connect_timeout` | `10s` | MySQL 建连超时（DSN `timeout`） |
 | `pool.max_idle_time` | `0`（不限） | `SetConnMaxIdleTime` |
 
 > **`min_connections` 与 hyperf 差异脚注**：hyperf swoole 下 `min_connections` 是启动时预建的连接数；Go `database/sql` 是懒连接，没有"预热"语义，我们把它映射到 `SetMaxIdleConns`（空闲连接上限）。两者稳态 QPS 相同，冷启动第一批请求在 Go 侧略慢。
@@ -591,6 +609,39 @@ printf '%s\n' \
 期望看到已启用模块的工具列表，以及 `serverInfo.name == "mcp-server"` / `"version":"0.5.0"` 的 `initialize` 响应。
 
 ## 在 MCP 客户端中注册
+
+### Codex
+
+Codex 使用 `~/.codex/config.toml`。下面把同一个 exe 注册为五个独立 MCP Server；环境名称按实际 `config.yaml` 调整：
+
+```toml
+[mcp_servers.mysql-product]
+type = "stdio"
+command = 'E:\code\go-mcp-server\bin\mcp-server.exe'
+args = ["--config", 'E:\code\go-mcp-server\config.yaml', "--module", "mysql", "--env", "product"]
+
+[mcp_servers.mysql-local]
+type = "stdio"
+command = 'E:\code\go-mcp-server\bin\mcp-server.exe'
+args = ["--config", 'E:\code\go-mcp-server\config.yaml', "--module", "mysql", "--env", "local"]
+
+[mcp_servers.redis-product]
+type = "stdio"
+command = 'E:\code\go-mcp-server\bin\mcp-server.exe'
+args = ["--config", 'E:\code\go-mcp-server\config.yaml', "--module", "redis", "--env", "product"]
+
+[mcp_servers.redis-local]
+type = "stdio"
+command = 'E:\code\go-mcp-server\bin\mcp-server.exe'
+args = ["--config", 'E:\code\go-mcp-server\config.yaml', "--module", "redis", "--env", "local"]
+
+[mcp_servers.apipost]
+type = "stdio"
+command = 'E:\code\go-mcp-server\bin\mcp-server.exe'
+args = ["--config", 'E:\code\go-mcp-server\config.yaml', "--module", "apipost"]
+```
+
+配置格式参见 [Codex 官方 MCP 文档](https://developers.openai.com/codex/mcp)。修改后需要重启 Codex 或重新加载 MCP 配置。
 
 以 Claude Code 的 `.mcp.json` 为例：
 

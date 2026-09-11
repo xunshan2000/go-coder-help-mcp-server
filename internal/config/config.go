@@ -19,6 +19,13 @@ type Config struct {
 	Apipost      *ApipostConfig               `yaml:"apipost"`
 }
 
+type LoadOptions struct {
+	Environment string
+	Database    bool
+	Redis       bool
+	Apipost     bool
+}
+
 type EnvironmentConfig struct {
 	Databases map[string]SourceConfig `yaml:"databases"`
 	Redis     map[string]RedisConfig  `yaml:"redis"`
@@ -102,6 +109,14 @@ type ApipostConfig struct {
 }
 
 func Load(path string) (*Config, error) {
+	return load(path, nil)
+}
+
+func LoadScoped(path string, options LoadOptions) (*Config, error) {
+	return load(path, &options)
+}
+
+func load(path string, options *LoadOptions) (*Config, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -116,6 +131,11 @@ func Load(path string) (*Config, error) {
 	if err := dec.Decode(&cfg); err != nil {
 		return nil, fmt.Errorf("parse config %s: %w", path, err)
 	}
+	if options != nil {
+		if err := cfg.applyLoadOptions(*options); err != nil {
+			return nil, err
+		}
+	}
 
 	cfg.resolvePaths(path)
 	cfg.applyDefaults()
@@ -124,6 +144,39 @@ func Load(path string) (*Config, error) {
 		return nil, err
 	}
 	return &cfg, nil
+}
+
+func (c *Config) applyLoadOptions(options LoadOptions) error {
+	if options.Environment != "" {
+		env, ok := c.Environments[options.Environment]
+		if !ok {
+			return fmt.Errorf("environment %q not found in config", options.Environment)
+		}
+		c.Environments = map[string]EnvironmentConfig{options.Environment: env}
+	}
+
+	disabled := false
+	if !options.Database {
+		c.Features.Database = &disabled
+	}
+	if !options.Redis {
+		c.Features.Redis = &disabled
+	}
+	if !options.Apipost {
+		c.Features.Apipost = &disabled
+		c.Apipost = nil
+	}
+
+	for name, env := range c.Environments {
+		if !options.Database {
+			env.Databases = nil
+		}
+		if !options.Redis {
+			env.Redis = nil
+		}
+		c.Environments[name] = env
+	}
+	return nil
 }
 
 func (c *Config) resolvePaths(configPath string) {

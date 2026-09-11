@@ -33,13 +33,24 @@ func (s *Source) PingContext(ctx context.Context) error {
 	return nil
 }
 
-func (s *Source) Do(ctx context.Context, args ...string) (any, error) {
+func (s *Source) Do(ctx context.Context, args ...string) (reply any, err error) {
 	if len(args) == 0 {
 		return nil, fmt.Errorf("redis command cannot be empty")
 	}
+	if s.ssh != nil {
+		defer func() {
+			if err != nil {
+				s.resetTunnel()
+			}
+		}()
+	}
 
+	addr, err := s.connectionAddr(ctx)
+	if err != nil {
+		return nil, err
+	}
 	dialer := &net.Dialer{Timeout: s.DialTimeout}
-	conn, err := dialer.DialContext(ctx, "tcp", s.Addr)
+	conn, err := dialer.DialContext(ctx, "tcp", addr)
 	if err != nil {
 		return nil, err
 	}

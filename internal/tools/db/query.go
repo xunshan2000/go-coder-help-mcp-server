@@ -113,7 +113,12 @@ func handleQuery(pool *Pool, defaults config.Defaults, logger *sqllog.Logger) fu
 		queryCtx, cancel := context.WithTimeout(ctx, src.QueryTimeout)
 		defer cancel()
 
-		columns, rows, rowCount, truncated, execErr := runQuery(queryCtx, src, sqlText, bindings, maxRows)
+		database, err := src.database(queryCtx)
+		if err != nil {
+			errMsg = fmt.Sprintf("connect failed [%s/%s]: %v", src.Environment, src.Key, err)
+			return renderErrorf("%s", errMsg), nil
+		}
+		columns, rows, rowCount, truncated, execErr := runQuery(queryCtx, src, database, sqlText, bindings, maxRows)
 		if execErr != nil {
 			errMsg = fmt.Sprintf("query failed [%s/%s]: %v", src.Environment, src.Key, execErr)
 			return renderErrorf("%s", errMsg), nil
@@ -136,11 +141,11 @@ func handleQuery(pool *Pool, defaults config.Defaults, logger *sqllog.Logger) fu
 	}
 }
 
-func runQuery(ctx context.Context, src *Source, sqlText string, bindings []any, maxRows int) (columns []string, rows [][]any, rowCount int, truncated bool, err error) {
+func runQuery(ctx context.Context, src *Source, database *sql.DB, sqlText string, bindings []any, maxRows int) (columns []string, rows [][]any, rowCount int, truncated bool, err error) {
 	var sqlRows *sql.Rows
 	var roExec driver.ReadOnlyExec
 
-	roExec, err = src.Driver.BeginReadOnly(ctx, src.DB)
+	roExec, err = src.Driver.BeginReadOnly(ctx, database)
 	if err != nil {
 		return nil, nil, 0, false, fmt.Errorf("begin read-only context failed: %w", err)
 	}

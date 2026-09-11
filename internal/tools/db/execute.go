@@ -105,7 +105,12 @@ func handleExecute(pool *Pool, logger *sqllog.Logger) func(ctx context.Context, 
 		queryCtx, cancel := context.WithTimeout(ctx, src.QueryTimeout)
 		defer cancel()
 
-		res, err := src.DB.ExecContext(queryCtx, sqlText, bindings...)
+		database, err := src.database(queryCtx)
+		if err != nil {
+			errMsg = fmt.Sprintf("connect failed [%s/%s]: %v", src.Environment, src.Key, err)
+			return renderErrorf("%s", errMsg), nil
+		}
+		res, err := database.ExecContext(queryCtx, sqlText, bindings...)
 		if err != nil {
 			errMsg = fmt.Sprintf("execute failed [%s/%s]: %v", src.Environment, src.Key, err)
 			return renderErrorf("%s", errMsg), nil

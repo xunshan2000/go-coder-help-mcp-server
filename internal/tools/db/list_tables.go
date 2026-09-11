@@ -39,7 +39,11 @@ func handleListTables(pool *Pool) func(ctx context.Context, req mcp.CallToolRequ
 		queryCtx, cancel := context.WithTimeout(ctx, src.QueryTimeout)
 		defer cancel()
 
-		tables, err := src.Driver.ListTables(queryCtx, src.DB)
+		database, err := src.database(queryCtx)
+		if err != nil {
+			return renderErrorf("connect failed [%s/%s]: %v", src.Environment, src.Key, err), nil
+		}
+		tables, err := src.Driver.ListTables(queryCtx, database)
 		if err != nil {
 			return renderErrorf("list tables failed [%s/%s]: %v", src.Environment, src.Key, err), nil
 		}
